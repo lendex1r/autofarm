@@ -1126,74 +1126,6 @@ local function RunVoteSkip()
     end
 end
 
-local CachedPlayAgain
-
-local function GetPlayAgainCallback()
-    if CachedPlayAgain then
-        return CachedPlayAgain
-    end
-
-    for _, f in ipairs(getgc(true)) do
-        if type(f) == "function" and islclosure(f) then
-            local info = debug.getinfo(f)
-
-            if info
-                and info.source == "=ReplicatedStorage.Client.Interfaces.Game.Components.NewRewards"
-                and info.name == "clicked" then
-
-                local state = debug.getupvalues(f)[1]
-
-                if state and state.playAgainClicked then
-                    CachedPlayAgain = state.playAgainClicked
-                    return CachedPlayAgain
-                end
-            end
-        end
-    end
-end
-
-local function TriggerPlayAgain()
-    local cb = GetPlayAgainCallback()
-    if not cb then
-        return false
-    end
-
-    local root = PlayerGui:FindFirstChild("ReactGameNewRewards")
-    local frame = root and root:FindFirstChild("Frame")
-    local gameOver = frame and frame:FindFirstChild("gameOver")
-    local rewards = gameOver and gameOver:FindFirstChild("RewardsScreen")
-    local playAgain = rewards and rewards:FindFirstChild("PlayAgain")
-
-    if not playAgain then
-        return false
-    end
-
-    local text =
-        playAgain:FindFirstChild("button")
-        and playAgain.button:FindFirstChild("content")
-        and playAgain.button.content:FindFirstChild("text")
-
-    if not text then
-        return false
-    end
-
-    local str = text.Text
-
-    -- Ждём пока кнопка станет активной
-    if str:find("%(0/") then
-        return false
-    end
-
-    local ok = pcall(cb)
-
-    if not ok then
-        CachedPlayAgain = nil
-        return false
-    end
-
-    return true
-end
-
 local function StartAutoReady()
     if AutoReadyRunning or not Globals.AutoReady or GameState ~= "GAME" then return end
     AutoReadyRunning = true
@@ -2879,32 +2811,6 @@ local function RejoinMatch()
     return res
 end
 
-local function RequestRematch()
-    local network = ReplicatedStorage:WaitForChild("Network", 10)
-    local gameManager = network and network:WaitForChild("GameManager", 10)
-    local rematch = gameManager and gameManager:WaitForChild("RE:Rematch", 10)
-
-    if not rematch then return false end
-
-    local stateReplicators = ReplicatedStorage:FindFirstChild("StateReplicators")
-    local gameStateReplicator = stateReplicators and stateReplicators:FindFirstChild("GameStateReplicator")
-    local voteReplicator = stateReplicators and stateReplicators:FindFirstChild("VoteReplicator")
-    local health = gameStateReplicator and gameStateReplicator:GetAttribute("Health")
-    local needsRestartVote = health ~= nil
-        and health <= 0
-        and voteReplicator
-        and voteReplicator:GetAttribute("Enabled") == true
-        and voteReplicator:GetAttribute("Title") == "Restart?"
-
-    local ok = pcall(function()
-        if needsRestartVote then
-            RemoteFunc:InvokeServer("Voting", "Skip")
-        end
-        rematch:FireServer()
-    end)
-    return ok
-end
-
 local function HandlePostMatch(skipRejoin)
     local UiRoot
     repeat
@@ -2919,7 +2825,7 @@ local function HandlePostMatch(skipRejoin)
 
     if not UiRoot then 
         if not skipRejoin then
-            return RequestRematch()
+            return RejoinMatch() 
         else
             return
         end
@@ -2928,7 +2834,7 @@ local function HandlePostMatch(skipRejoin)
 
     if not Globals.SendWebhook then
         if not skipRejoin then
-            RequestRematch()
+            RejoinMatch()
         end
         return
     end
@@ -2998,7 +2904,7 @@ local function HandlePostMatch(skipRejoin)
     task.wait(1.5)
 
     if not skipRejoin then
-        RequestRematch()
+        RejoinMatch()
     end
 
     task.wait(9e9)
@@ -3304,24 +3210,70 @@ StartTimeScale = function()
 end
 
 -- // ingame control
+local CachedPlayAgainCallback
+
+local function FindPlayAgainCallback()
+    if type(CachedPlayAgainCallback) == "function" then
+        return CachedPlayAgainCallback
+    end
+
+    if type(getgc) ~= "function"
+        or type(islclosure) ~= "function"
+        or not debug
+        or type(debug.getinfo) ~= "function"
+        or type(debug.getupvalues) ~= "function" then
+        return nil
+    end
+
+    for _, closure in ipairs(getgc(true)) do
+        if type(closure) == "function" and islclosure(closure) then
+            local okInfo, info = pcall(debug.getinfo, closure)
+
+            if okInfo
+                and info
+                and info.source == "=ReplicatedStorage.Client.Interfaces.Game.Components.NewRewards"
+                and info.name == "clicked" then
+
+                local okUpvalues, upvalues = pcall(debug.getupvalues, closure)
+                local state = okUpvalues and upvalues and upvalues[1]
+
+                if type(state) == "table" and type(state.playAgainClicked) == "function" then
+                    CachedPlayAgainCallback = state.playAgainClicked
+                    return CachedPlayAgainCallback
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
 local function TriggerRestart()
-    local UiRoot = PlayerGui:WaitForChild("ReactGameNewRewards")
-    local FoundSection = false
+    local rewardsScreen
 
     repeat
         task.wait(0.3)
-        local f = UiRoot:FindFirstChild("Frame")
-        local g = f and f:FindFirstChild("gameOver")
-        local s = g and g:FindFirstChild("RewardsScreen")
-        if s and s:FindFirstChild("RewardsSection") then
-            FoundSection = true
-        end
-    until FoundSection
 
-    task.wait(3)
-    RequestRematch()
+        local root = PlayerGui:FindFirstChild("ReactGameNewRewards")
+        local frame = root and root:FindFirstChild("Frame")
+        local gameOver = frame and frame:FindFirstChild("gameOver")
+        rewardsScreen = gameOver and gameOver:FindFirstChild("RewardsScreen")
+    until (rewardsScreen and rewardsScreen:FindFirstChild("RewardsSection"))
+        or (not Globals.AutoRestart and not Globals.AutoRejoin)
+
+    local callback = FindPlayAgainCallback()
+    if type(callback) ~= "function" then
+        return false
+    end
+
+    local ok = pcall(callback)
+    if not ok then
+        CachedPlayAgainCallback = nil
+        return false
+    end
+
+    return true
 end
-
 local function GetCurrentWave()
     local label
 
@@ -4280,84 +4232,59 @@ function StartBackToLobby()
 
     task.spawn(function()
         local stateReplicators = ReplicatedStorage:WaitForChild("StateReplicators", 30)
-        local gameStateReplicator = stateReplicators and stateReplicators:WaitForChild("GameStateReplicator", 30)
-        local voteReplicator = stateReplicators and stateReplicators:WaitForChild("VoteReplicator", 30)
-        
-        if not gameStateReplicator or not voteReplicator then
-            while true do
-                pcall(HandlePostMatch)
-                task.wait(1)
-            end
+        local gameStateReplicator = stateReplicators
+            and stateReplicators:WaitForChild("GameStateReplicator", 30)
+
+        if not gameStateReplicator then
+            BackToLobbyRunning = false
+            pcall(HandlePostMatch)
             return
         end
 
         while Globals.AutoRejoin or Globals.AutoRestart do
-            local isGameOver = gameStateReplicator:GetAttribute("GameOver") == true
-            if isGameOver then
+            if gameStateReplicator:GetAttribute("GameOver") == true then
                 local health = gameStateReplicator:GetAttribute("Health") or 0
+
                 if health > 0 then
+                    -- Victory: keep the existing Auto Rejoin behavior.
                     if Globals.AutoRejoin then
                         if isfile("ADS_LastStrat.lua") then
                             pcall(delfile, "ADS_LastStrat.lua")
                         end
+
                         pcall(HandlePostMatch)
                         break
                     end
                 else
+                    -- Defeat: the old Restart? vote no longer exists.
+                    -- Keep ADS_LastStrat.lua, process rewards, then start a new match.
                     if Globals.AutoRestart then
                         task.spawn(pcall, HandlePostMatch, true)
-                        local lastRematchTime = 0
-                        local rematchRequested = false
-                        while Globals.AutoRestart do
-                            if gameStateReplicator:GetAttribute("GameOver") == false then
-                                break
-                            end
-                            if TriggerPlayAgain() then
-                                break
-                            end
-                            task.wait(0.5)
+                        task.wait(1)
+
+                        local ok = pcall(RejoinMatch)
+                        if not ok then
+                            pcall(SmartTeleportToLobby)
                         end
 
-                        TriggerPlayAgain()
-
-                        task.wait(3)
-
-                        if gameStateReplicator:GetAttribute("GameOver") == false then
-                                break
-                            end
-                        end
-                        
-                        if not Globals.AutoRestart then break end
-                        
-                        if isfile("ADS_LastStrat.lua") then
-                            task.spawn(function()
-                                repeat
-                                    task.wait(0.1)
-                                    local towersFolder = workspace:FindFirstChild("Towers")
-                                until (towersFolder and #towersFolder:GetChildren() == 0) or not Globals.AutoRestart
-                                
-                                if not Globals.AutoRestart then return end
-                                TDS:ResetAllStates()
-                                TDS:RunStrategy()
-                            end)
-                        end
-                        
-                        repeat task.wait(1) until gameStateReplicator:GetAttribute("GameOver") == false or not Globals.AutoRestart
+                        break
                     elseif Globals.AutoRejoin then
                         if isfile("ADS_LastStrat.lua") then
                             pcall(delfile, "ADS_LastStrat.lua")
                         end
+
                         pcall(HandlePostMatch)
                         break
                     end
                 end
             end
+
             task.wait(1)
         end
+
         BackToLobbyRunning = false
     end)
 end
-
 local function StartAntiLag()
     if AntiLagRunning then return end
     AntiLagRunning = true
