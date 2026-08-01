@@ -1,5 +1,5 @@
 local Globals = getgenv()
-local ADS_LIBRARY_VERSION = "CUSTOM_V6_2026_08_02"
+local ADS_LIBRARY_VERSION = "CUSTOM_V8_HACKER_RECORDER_2026_08_02"
 
 if shared.TDSTable then
     if shared.ADSLibraryVersion ~= ADS_LIBRARY_VERSION then
@@ -2247,12 +2247,7 @@ local Configuration = Window:Tab({Title = "Configuration", Icon = "sliders-horiz
             SetSetting("WebhookURL", value)
 
             if value ~= "" and value:find("https://discord.com/api/webhooks/") then
-                Window:Notify({
-                    Title = "ADS",
-                    Desc = "Webhook is successfully set!",
-                    Time = 3,
-                    Type = "normal"
-                })
+                print("[Webhook] URL saved successfully.")
             end
         end
     })
@@ -2262,26 +2257,16 @@ local Configuration = Window:Tab({Title = "Configuration", Icon = "sliders-horiz
     Configuration:Button({
         Title = "Save Settings",
         Callback = function()
-            Window:Notify({
-                    Title = "ADS",
-                    Desc = "Settings Saved!",
-                    Time = 3,
-                    Type = "normal"
-                })
             SaveSettings()
+            print("[Configuration] Settings saved.")
         end
     })
 
     Configuration:Button({
         Title = "Load Settings",
         Callback = function()
-            Window:Notify({
-                    Title = "ADS",
-                    Desc = "Settings Loaded!",
-                    Time = 3,
-                    Type = "normal"
-                })
             LoadSettings()
+            print("[Configuration] Settings loaded.")
         end
     })
 
@@ -2504,15 +2489,52 @@ end
 
 Window:Line()
 
-local RecorderInit = loadstring(game:HttpGet("https://raw.githubusercontent.com/DuxiiT/auto-strat/refs/heads/main/Sources/Recorder.lua"))()
-RecorderInit({
-    Window = Window,
-    ReplicatedStorage = ReplicatedStorage,
-    LocalPlayer = LocalPlayer,
-    HttpService = HttpService,
-    GameState = GameState,
-    workspace = workspace
-})
+local RecorderSource = game:HttpGet("https://raw.githubusercontent.com/DuxiiT/auto-strat/refs/heads/main/Sources/Recorder.lua")
+
+-- Record remotes that return nil as well as true. Newer TDS abilities can be accepted with nil response.
+RecorderSource = RecorderSource:gsub(
+    'if not results or results%[1%] ~= true then%s+return%s+end',
+    'if results and results.n and results.n > 0 and results[1] == false then return end'
+)
+
+-- Generated strategies must reuse this customized library instead of downloading the original GitHub file.
+local RecorderBootstrap = [[local TDS = shared.TDSTable
+if not TDS then
+    local candidates = {
+        "Library_v8_hacker_recorder.lua",
+        "Library.lua"
+    }
+    for _, path in ipairs(candidates) do
+        if isfile and isfile(path) then
+            local chunk = loadstring(readfile(path))
+            if chunk then
+                TDS = chunk()
+                break
+            end
+        end
+    end
+end
+assert(TDS, "Customized TDS Library is not loaded. Put Library_v8_hacker_recorder.lua in autoexecute/workspace.")]]
+
+RecorderSource = RecorderSource:gsub(
+    'local TDS = loadstring%(game:HttpGet%(%\\"https://raw%.githubusercontent%.com/DuxiiT/auto%-strat/refs/heads/main/Library%.lua%\\"%)%)%(%)',
+    RecorderBootstrap:gsub('%%', '%%%%')
+)
+
+local RecorderChunk, RecorderCompileError = loadstring(RecorderSource)
+if not RecorderChunk then
+    warn("[Recorder] Compile error:", RecorderCompileError)
+else
+    local RecorderInit = RecorderChunk()
+    RecorderInit({
+        Window = Window,
+        ReplicatedStorage = ReplicatedStorage,
+        LocalPlayer = LocalPlayer,
+        HttpService = HttpService,
+        GameState = GameState,
+        workspace = workspace
+    })
+end
 
 Window:Line()
 
@@ -2612,6 +2634,22 @@ local function SaveSessionState()
     end
 end
 LoadSessionState()
+-- Create/update the persistence file immediately. Previously it was only
+-- written after a completed match, so a lobby -> game teleport could reset
+-- the session start time before the first match ended.
+SaveSessionState()
+
+pcall(function()
+    LocalPlayer.OnTeleport:Connect(function()
+        SaveSessionState()
+    end)
+end)
+
+task.spawn(function()
+    while task.wait(2) do
+        SaveSessionState()
+    end
+end)
 
 local function FormatDuration(totalSeconds)
     totalSeconds = math.max(0, math.floor(tonumber(totalSeconds) or 0))
@@ -2645,11 +2683,25 @@ local function ReadNumberStat(names)
         end
     end
 
-    for _, child in ipairs(LocalPlayer:GetChildren()) do
-        local normalized = string.lower(child.Name):gsub("[^%w]", "")
-        if wanted[normalized] and child.Value ~= nil then
-            local value = tonumber(child.Value)
+    -- TDS currently exposes several account totals (including Triumphs)
+    -- as attributes directly on LocalPlayer.
+    for attributeName, attributeValue in pairs(LocalPlayer:GetAttributes()) do
+        local normalized = string.lower(attributeName):gsub("[^%w]", "")
+        if wanted[normalized] then
+            local value = tonumber(attributeValue)
             if value then return value end
+        end
+    end
+
+    -- Check leaderstats, folders and other nested value objects as well.
+    for _, child in ipairs(LocalPlayer:GetDescendants()) do
+        local normalized = string.lower(child.Name):gsub("[^%w]", "")
+        if wanted[normalized] then
+            local ok, rawValue = pcall(function() return child.Value end)
+            if ok then
+                local value = tonumber(rawValue)
+                if value then return value end
+            end
         end
     end
 
@@ -2684,7 +2736,7 @@ local function GetAccountStats()
     return {
         Money = ReadNumberStat({"Coins", "Money", "Cash"}),
         Gems = ReadNumberStat({"Gems", "Gem"}),
-        Wins = ReadNumberStat({"Wins", "Win", "Triumphs"}),
+        Wins = ReadNumberStat({"Wins", "Win", "Triumphs", "TotalWins", "TotalTriumphs"}),
         Losses = ReadNumberStat({"Losses", "Loses", "Defeats", "Loss"}),
         Level = ReadNumberStat({"Level", "CurrentLevel", "PlayerLevel"})
     }
@@ -3510,505 +3562,146 @@ local function DoSetOption(TObj, OptName, OptVal, ReqWave)
 end
 
 local function DoActivateAbility(TObj, AbName, AbData, IsLooping)
-    if type(AbData) == "boolean" then IsLooping = AbData AbData = nil end
+    if type(AbData) == "boolean" then
+        IsLooping = AbData
+        AbData = nil
+    end
+
     AbData = type(AbData) == "table" and AbData or nil
-    local positions = AbData and type(AbData.towerPosition) == "table" and AbData.towerPosition or nil
-    local CloneIdx = AbData and (AbData.towerToClone or AbData.towerTarget)
-    local TargetIdx = AbData and AbData.towerTarget
+
     local normalizedAbility = tostring(AbName or ""):lower():gsub("[^%w]", "")
     local isHologram = normalizedAbility:find("hologram", 1, true) ~= nil
 
     local function resolveTower(value)
-        if type(value) == "number" then return TDS.PlacedTowers[value] end
-        if typeof(value) == "Instance" then return value end
-    end
-    local function resolvePosition(value)
-        if typeof(value) == "Vector3" then return value end
-        if typeof(value) == "CFrame" then return value.Position end
-        if type(value) == "table" then
-            local x,y,z = tonumber(value.X or value.x or value[1]), tonumber(value.Y or value.y or value[2]), tonumber(value.Z or value.z or value[3])
-            if x and y and z then return Vector3.new(x,y,z) end
+        if type(value) == "number" then
+            return TDS.PlacedTowers[value]
         end
+        if typeof(value) == "Instance" then
+            return value
+        end
+        return nil
     end
-    local function buildData()
-        local data = AbData and table.clone(AbData) or {}
-        local chosenPosition
-        if positions and #positions > 0 then chosenPosition = resolvePosition(positions[math.random(#positions)]) else chosenPosition = resolvePosition(data.towerPosition or data.position or data.Position) end
-        local cloneTower, targetTower = resolveTower(CloneIdx), resolveTower(TargetIdx)
-        data.towerToClone = cloneTower or data.towerToClone
-        data.towerTarget = targetTower or data.towerTarget
-        if isHologram then
-            local selected = cloneTower or targetTower
-            if selected then data.Tower=selected data.tower=selected data.Target=selected end
-            if chosenPosition then data.Position=chosenPosition data.position=chosenPosition data.towerPosition=chosenPosition end
-        elseif chosenPosition then data.towerPosition = chosenPosition end
-        return next(data) and data or nil
-    end
-    local function describe(value)
+
+    local function resolvePosition(value)
+        if typeof(value) == "Vector3" then
+            return value
+        end
+        if typeof(value) == "CFrame" then
+            return value.Position
+        end
         if type(value) == "table" then
-            local ok, encoded = pcall(HttpService.JSONEncode, HttpService, value)
+            local x = tonumber(value.X or value.x or value[1])
+            local y = tonumber(value.Y or value.y or value[2])
+            local z = tonumber(value.Z or value.z or value[3])
+            if x and y and z then
+                return Vector3.new(x, y, z)
+            end
+        end
+        return nil
+    end
+
+    local function describe(value)
+        if typeof(value) == "Instance" then
+            return value:GetFullName()
+        end
+        if type(value) == "table" then
+            local printable = {}
+            for k, v in pairs(value) do
+                printable[tostring(k)] = typeof(v) == "Instance" and v:GetFullName() or tostring(v)
+            end
+            local ok, encoded = pcall(HttpService.JSONEncode, HttpService, printable)
             if ok then return encoded end
         end
         return tostring(value)
     end
 
+    local function buildNormalData()
+        if not AbData then return nil end
+        local data = table.clone(AbData)
+        if data.towerToClone ~= nil then
+            data.towerToClone = resolveTower(data.towerToClone) or data.towerToClone
+        end
+        if data.towerTarget ~= nil then
+            data.towerTarget = resolveTower(data.towerTarget) or data.towerTarget
+        end
+        if data.towerPosition ~= nil then
+            data.towerPosition = resolvePosition(data.towerPosition) or data.towerPosition
+        end
+        return next(data) and data or nil
+    end
+
+    local function buildHologramData()
+        local cloneValue = AbData and (AbData.towerToClone or AbData.towerTarget)
+        local positionValue = AbData and (AbData.towerPosition or AbData.Position or AbData.position)
+
+        local cloneTower = resolveTower(cloneValue)
+        local clonePosition = resolvePosition(positionValue)
+
+        if not cloneTower then
+            warn("[Hacker Hologram] Invalid towerToClone:", tostring(cloneValue))
+            return nil
+        end
+        if not cloneTower.Parent then
+            warn("[Hacker Hologram] Clone target no longer exists:", tostring(cloneValue))
+            return nil
+        end
+        if not clonePosition then
+            warn("[Hacker Hologram] Invalid towerPosition:", tostring(positionValue))
+            return nil
+        end
+
+        -- IMPORTANT: this is the exact payload generated by the current Recorder.
+        -- Do not add aliases such as Tower/Target/Position: the server schema rejects them.
+        return {
+            towerToClone = cloneTower,
+            towerPosition = clonePosition
+        }
+    end
+
     local function attempt()
-        local data = buildData()
-
-        if isHologram then
-            print("[Hacker Hologram] hackerIndexObject=", TObj:GetFullName())
-            print("[Hacker Hologram] abilityName=", tostring(AbName))
-            print("[Hacker Hologram] payloadData=", describe(data))
-
-            local variants = {
-                {"Troops", "Abilities", "Activate", {Troop=TObj, Name=AbName, Data=data}},
-                {"Troops", "Ability", "Activate", {Troop=TObj, Name=AbName, Data=data}},
-                {"Troops", "Abilities", "Activate", {Troop=TObj, Ability=AbName, Data=data}},
-                {"Troops", "Abilities", AbName, {Troop=TObj, Data=data}}
-            }
-
-            for variantIndex, args in ipairs(variants) do
-                local beforeCount = workspace:FindFirstChild("Towers") and #workspace.Towers:GetChildren() or 0
-                local ok, res = pcall(function()
-                    return RemoteFunc:InvokeServer(unpack(args))
-                end)
-                task.wait(0.75)
-                local afterCount = workspace:FindFirstChild("Towers") and #workspace.Towers:GetChildren() or beforeCount
-
-                print(
-                    "[Hacker Hologram] variant=", variantIndex,
-                    "ok=", ok,
-                    "responseType=", typeof(res),
-                    "response=", describe(res),
-                    "towersBefore=", beforeCount,
-                    "towersAfter=", afterCount
-                )
-
-                if ok and (CheckResOk(res) or afterCount > beforeCount) then
-                    return true
-                end
-            end
-
-            warn("[Hacker Hologram] All known request formats failed. Copy every '[Hacker Hologram]' console line and send it for analysis.")
+        local data = isHologram and buildHologramData() or buildNormalData()
+        if isHologram and not data then
             return false
         end
 
-        for tries = 1, 20 do
-            local ok, res = pcall(function()
-                return RemoteFunc:InvokeServer("Troops", "Abilities", "Activate", {
-                    Troop = TObj,
-                    Name = AbName,
-                    Data = data
-                })
-            end)
+        local beforeCount = workspace:FindFirstChild("Towers") and #workspace.Towers:GetChildren() or 0
+        local ok, res = pcall(function()
+            return RemoteFunc:InvokeServer("Troops", "Abilities", "Activate", {
+                Troop = TObj,
+                Name = AbName,
+                Data = data
+            })
+        end)
 
-            if ok and (CheckResOk(res) or res == nil) then return true end
-            if tries == 1 or tries % 5 == 0 then
-                warn("[Ability]", tostring(AbName), "attempt", tries, "failed:", describe(res))
-            end
-            task.wait(0.35)
+        if isHologram then
+            task.wait(0.8)
+            local afterCount = workspace:FindFirstChild("Towers") and #workspace.Towers:GetChildren() or beforeCount
+            print("[Hacker Hologram] hacker=", TObj:GetFullName())
+            print("[Hacker Hologram] clone=", data and describe(data.towerToClone))
+            print("[Hacker Hologram] position=", data and tostring(data.towerPosition))
+            print("[Hacker Hologram] ok=", ok, "responseType=", typeof(res), "response=", describe(res), "towersBefore=", beforeCount, "towersAfter=", afterCount)
+
+            -- Some TDS remotes return nil even when accepted. The tower count or true response confirms it.
+            return ok and (res == true or CheckResOk(res) or afterCount > beforeCount)
         end
 
-        return false
+        return ok and (res == nil or CheckResOk(res))
     end
+
     if IsLooping then
-        local active=true
-        task.spawn(function() while active do attempt() task.wait(1) end end)
-        return function() active=false end
-    end
-    return attempt()
-end
-
--- // public api
--- lobby
-function TDS:Mode(difficulty, code)
-    self.SavedDifficulty = difficulty
-    local targetCode = ""
-
-    if IsMobile then
-        if (code and code ~= "") or (Globals.PrivateCode and Globals.PrivateCode ~= "") then
-            Window:Notify({
-                Title = "Warning",
-                Desc = "Private server codes are not supported on mobile devices.",
-                Time = 25,
-                Type = "error"
-            })
-        end
-    else
-        if code and code ~= "" then
-            targetCode = code
-        elseif Globals.PrivateCode then
-            targetCode = Globals.PrivateCode
-        end
-    end
-
-    self.PrivateCode = tostring(targetCode)
-
-    if GameState ~= "LOBBY" then 
-        return false 
-    end
-
-    if targetCode ~= "" and not MarketplaceService:UserOwnsGamePassAsync(LocalPlayer.UserId, 10518590) then
-        local ServerType = game:GetService('RobloxReplicatedStorage').GetServerType:InvokeServer()
-        
-        if ServerType ~= "VIPServer" then
-            game:GetService("ExperienceService"):LaunchExperience({
-                placeId = game.PlaceId, 
-                linkCode = tostring(targetCode)
-            })
-            return true
-        end
-    end
-
-    if difficulty == "Trial" then
-        local Elevators = workspace:WaitForChild("TrialElevators")
-        local Network = ReplicatedStorage:WaitForChild("Network")
-        
-        if Elevators and Network then
-            local targetElevator = nil
-            
-            repeat
-                for _, v in pairs(Elevators:GetChildren()) do
-                    if v.Name:match("Elevator") then
-                        targetElevator = v
-                        break
-                    end
-                end
-                if not targetElevator then task.wait(0.5) end
-            until targetElevator
-
-            task.spawn(function()
-                local ElevatorsNet = Network:WaitForChild("Elevators")
-                local EnterRemote = ElevatorsNet:WaitForChild("RF:Enter")
-                local SetSizeRemote = ElevatorsNet:WaitForChild("RF:SetSize")
-                local SetReadyRemote = ElevatorsNet:WaitForChild("RF:SetReady")
-                
-                pcall(function() EnterRemote:InvokeServer(targetElevator) end)
-                pcall(function() SetSizeRemote:InvokeServer(1) end)
-                pcall(function() SetReadyRemote:InvokeServer(true) end)
-            end)
-            
-            return true
-        end
-    end
-
-    local LobbyHud = PlayerGui:WaitForChild("ReactLobbyHud", 30)
-    local frame = LobbyHud and LobbyHud:WaitForChild("Frame", 30)
-    local MatchMaking = frame and frame:WaitForChild("matchmaking", 30)
-
-    if MatchMaking then
-        local remote = game:GetService("ReplicatedStorage"):WaitForChild("RemoteFunction")
-        local success = false
-        local res
-        repeat
-            local ok, result = pcall(function()
-                local mode = TDS.MatchmakingMap[difficulty]
-                local payload
-
-                if difficulty == "Hardcore" then
-                    payload = {
-                        mode = "hardcore",
-                        difficulty = "Easy",
-                        count = 1
-                    }
-                elseif difficulty == "Voidcore" then
-                    payload = {
-                        mode = "hardcore",
-                        difficulty = "Hard",
-                        count = 1
-                    }
-                elseif mode then
-                    payload = {
-                        mode = mode,
-                        count = 1
-                    }
-                    if difficulty:match("Ducky") then
-                        payload.difficulty = difficulty:gsub("Ducky", "")
-                    end
-                else
-                    payload = {
-                        difficulty = difficulty,
-                        mode = "survival",
-                        count = 1
-                    }
-                end
-
-                return remote:InvokeServer("Multiplayer", "v2:start", payload)
-            end)
-
-            if ok and CheckResOk(result) then
-                success = true
-                res = result
-            else
-                task.wait(0.5) 
-            end
-        until success
-    end
-
-    return true
-end
-
-function TDS:Loadout(...)
-    if GameState ~= "GAME" then
-        return
-    end
-
-    local towers = {...}
-    local remote = game:GetService("ReplicatedStorage"):WaitForChild("RemoteEvent")
-    local StateReplicators = ReplicatedStorage:FindFirstChild("StateReplicators")
-
-    local CurrentlyEquipped = {}
-
-    if StateReplicators then
-        for _, folder in ipairs(StateReplicators:GetChildren()) do
-            if folder.Name == "PlayerReplicator" and folder:GetAttribute("UserId") == LocalPlayer.UserId then
-                local EquippedAttr = folder:GetAttribute("EquippedTowers")
-                if type(EquippedAttr) == "string" then
-                    local CleanedJson = EquippedAttr:match("%[.*%]") 
-                    local DecodeSuccess, decoded = pcall(function()
-                        return HttpService:JSONDecode(CleanedJson)
-                    end)
-
-                    if DecodeSuccess and type(decoded) == "table" then
-                        CurrentlyEquipped = decoded
-                    end
-                end
-            end
-        end
-    end
-
-    for _, CurrentTower in ipairs(CurrentlyEquipped) do
-        if CurrentTower ~= "None" then
-            local UnequipDone = false
-            repeat
-                local ok = pcall(function()
-                    remote:FireServer("Inventory", "Unequip", "Tower", CurrentTower)
-                    task.wait(0.3)
-                end)
-                if ok then UnequipDone = true else task.wait(0.2) end
-            until UnequipDone
-        end
-    end
-
-    task.wait(0.5)
-
-    for _, TowerName in ipairs(towers) do
-        if TowerName and TowerName ~= "" then
-            local EquipSuccess = false
-            repeat
-                local ok = pcall(function()
-                    remote:FireServer("Inventory", "Equip", "Tower", TowerName)
-                    Logger:Log("Equipped tower: " .. TowerName)
-                    task.wait(0.3)
-                end)
-                if ok then EquipSuccess = true else task.wait(0.2) end
-            until EquipSuccess
-        end
-    end
-
-    task.wait(0.5)
-    return true
-end
-
--- ingame
-function TDS:VoteSkip(StartWave, EndWave)
-    task.spawn(function()
-        local CurrentWave = GetCurrentWave()
-        
-        self.LastVoteSkipTarget = self.LastVoteSkipTarget or 0
-        
-        if not StartWave then
-            if self.LastVoteSkipTarget < CurrentWave then
-                self.LastVoteSkipTarget = CurrentWave
-            else
-                self.LastVoteSkipTarget = self.LastVoteSkipTarget + 1
-            end
-            StartWave = self.LastVoteSkipTarget
-            EndWave = StartWave
-        else
-            EndWave = EndWave or StartWave
-            self.LastVoteSkipTarget = EndWave
-        end
-
-        for wave = StartWave, EndWave do
-            while GetCurrentWave() < wave do
+        local active = true
+        task.spawn(function()
+            while active do
+                attempt()
                 task.wait(1)
             end
-
-            local TargetNextWave = wave + 1
-            
-            while GetCurrentWave() < TargetNextWave do
-                local VoteUi = PlayerGui:FindFirstChild("ReactOverridesVote")
-                local VoteButton = VoteUi 
-                    and VoteUi:FindFirstChild("Frame") 
-                    and VoteUi.Frame:FindFirstChild("votes") 
-                    and VoteUi.Frame.votes:FindFirstChild("vote", true)
-
-                if VoteButton and VoteButton.Position == UDim2.new(0.5, 0, 0.5, 0) then
-                    pcall(function()
-                        RemoteFunc:InvokeServer("Voting", "Skip")
-                    end)
-                end
-                
-                task.wait(0.5)
-            end
-            
-            Logger:Log("Successfully skipped wave " .. wave)
-        end
-    end)
-end
-
-function TDS:GameInfo(name, list)
-    if GameState ~= "GAME" then return false end
-
-    local VoteGui = PlayerGui:WaitForChild("ReactGameIntermission", 30)
-    if not (VoteGui and VoteGui.Enabled and VoteGui:WaitForChild("Frame", 5)) then return end
-
-    local modifiers = (list and next(list)) and list or Globals.Modifiers
-
-    CastModifierVote(modifiers)
-
-    local stateReplicators = game:GetService("ReplicatedStorage"):WaitForChild("StateReplicators", 5)
-    local gameStateReplicator = stateReplicators and stateReplicators:FindFirstChild("GameStateReplicator")
-
-    if MarketplaceService:UserOwnsGamePassAsync(LocalPlayer.UserId, 10518590) or (gameStateReplicator and gameStateReplicator:GetAttribute("IsPrivateServer") == true) then
-        SelectMapOverride(name, "vip")
-        Logger:Log("Selected map: " .. name)
-        repeat task.wait(1) until PlayerGui:FindFirstChild("ReactUniversalHotbar")
-        return true 
-    elseif IsMapAvailable(name) then
-        SelectMapOverride(name)
-        repeat task.wait(1) until PlayerGui:FindFirstChild("ReactUniversalHotbar")
-        return true
-    else
-        Logger:Log("Map '" .. name .. "' not available, rejoining...")
-        RejoinMatch()
-        repeat task.wait(9999) until false
-    end
-end
-
-function TDS:UnlockTimeScale()
-    UnlockSpeedTickets()
-end
-
-function TDS:TimeScale(val)
-    SetGameTimescale(val)
-end
-
-function TDS:StartGame()
-    LobbyReadyUp()
-end
-
-function TDS:Ready()
-    if GameState ~= "GAME" then
-        return false 
-    end
-    MatchReadyUp()
-end
-
-function TDS:GetWave()
-    return GetCurrentWave()
-end
-
-function TDS:WaitForWave(targetWave)
-    if GameState ~= "GAME" then return false end
-    while self:GetWave() < targetWave do
-        task.wait(0.5)
-    end
-    return true
-end
-
-function TDS:RestartGame()
-    TriggerRestart()
-end
-
-function TDS:Place(TName, px, py, pz, ...)
-    local args = {...}
-    local isStacking = args[#args] == "stack" or args[#args] == true
-
-    if isStacking and not PremiumLoaded and GameState == "GAME" then
-        Window:Notify({
-            Title = "ADS",
-            Desc = "Stacking requires Premium. Automatically loading key system...",
-            Time = 3,
-            Type = "normal"
-        })
-
-        self:Addons()
-        return self:Place(TName, px, py, pz, unpack(args))
-    end
-
-    if GameState ~= "GAME" then
-        return false 
-    end
-
-    local existing = {}
-    for _, child in ipairs(workspace.Towers:GetChildren()) do
-        for _, SubChild in ipairs(child:GetChildren()) do
-            if SubChild.Name == "Owner" and SubChild.Value == LocalPlayer.UserId then
-                existing[child] = true
-                break
-            end
+        end)
+        return function()
+            active = false
         end
     end
 
-    DoPlaceTower(TName, Vector3.new(px, py, pz), unpack(args))
-
-    local NewT
-    repeat
-        for _, child in ipairs(workspace.Towers:GetChildren()) do
-            if not existing[child] then
-                for _, SubChild in ipairs(child:GetChildren()) do
-                    if SubChild.Name == "Owner" and SubChild.Value == LocalPlayer.UserId then
-                        NewT = child
-                        break
-                    end
-                end
-            end
-            if NewT then break end
-        end
-        task.wait(0.05)
-    until NewT
-
-    table.insert(self.PlacedTowers, NewT)
-    return #self.PlacedTowers
-end
-
-function TDS:Upgrade(idx, PId)
-    local t = self.PlacedTowers[idx]
-    if t then
-        DoUpgradeTower(t, PId or 1)
-        Logger:Log("Upgrading tower index: " .. idx)
-        UpgradeHistory[idx] = (UpgradeHistory[idx] or 0) + 1
-    end
-end
-
-function TDS:SetTarget(idx, TargetType, ReqWave)
-    if ReqWave then
-        repeat task.wait(0.5) until GetCurrentWave() >= ReqWave
-    end
-
-    local t = self.PlacedTowers[idx]
-    if not t then return end
-
-    pcall(function()
-        RemoteFunc:InvokeServer("Troops", "Target", "Set", {
-            Troop = t,
-            Target = TargetType
-        })
-        Logger:Log("Set target for tower index " .. idx .. " to " .. TargetType)
-    end)
-end
-
-function TDS:Sell(idx, ReqWave)
-    if ReqWave then
-        repeat task.wait(0.5) until GetCurrentWave() >= ReqWave
-    end
-    local t = self.PlacedTowers[idx]
-    if t and DoSellTower(t) then
-        return true
-    end
-    return false
+    return attempt()
 end
 
 function TDS:SellAll(ReqWave)
