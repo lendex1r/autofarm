@@ -1154,15 +1154,44 @@ end
 
 local function TriggerPlayAgain()
     local cb = GetPlayAgainCallback()
-
-    if cb then
-        local ok, err = pcall(cb)
-
-        if not ok then
-            warn("[AutoRestart] PlayAgain failed:", err)
-            CachedPlayAgain = nil
-        end
+    if not cb then
+        return false
     end
+
+    local root = PlayerGui:FindFirstChild("ReactGameNewRewards")
+    local frame = root and root:FindFirstChild("Frame")
+    local gameOver = frame and frame:FindFirstChild("gameOver")
+    local rewards = gameOver and gameOver:FindFirstChild("RewardsScreen")
+    local playAgain = rewards and rewards:FindFirstChild("PlayAgain")
+
+    if not playAgain then
+        return false
+    end
+
+    local text =
+        playAgain:FindFirstChild("button")
+        and playAgain.button:FindFirstChild("content")
+        and playAgain.button.content:FindFirstChild("text")
+
+    if not text then
+        return false
+    end
+
+    local str = text.Text
+
+    -- Ждём пока кнопка станет активной
+    if str:find("%(0/") then
+        return false
+    end
+
+    local ok = pcall(cb)
+
+    if not ok then
+        CachedPlayAgain = nil
+        return false
+    end
+
+    return true
 end
 
 local function StartAutoReady()
@@ -4282,6 +4311,11 @@ function StartBackToLobby()
                         while Globals.AutoRestart do
                             if gameStateReplicator:GetAttribute("GameOver") == false then
                                 break
+                            end
+                            if TriggerPlayAgain() then
+                                break
+                            end
+                            task.wait(0.5)
                         end
 
                         TriggerPlayAgain()
