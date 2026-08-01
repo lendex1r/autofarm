@@ -2430,160 +2430,7 @@ RecorderInit({
 
 Window:Line()
 
-local Settings = Window:Tab({Title = "Settings", Icon = "settings"}) do
-    Settings:Section({Title = "Settings"})
-    Settings:Button({
-        Title = "Save Settings",
-        Callback = function()
-            Window:Notify({
-                    Title = "ADS",
-                    Desc = "Settings Saved!",
-                    Time = 3,
-                    Type = "normal"
-                })
-            SaveSettings()
-        end
-    })
-
-    Settings:Button({
-        Title = "Load Settings",
-        Callback = function()
-            Window:Notify({
-                    Title = "ADS",
-                    Desc = "Settings Loaded!",
-                    Time = 3,
-                    Type = "normal"
-                })
-            LoadSettings()
-        end
-    })
-
-    Settings:Section({Title = "Privacy"})
-    Settings:Toggle({
-        Title = "Hide Username",
-        Desc = "",
-        Value = Globals.HideUsername,
-        Callback = function(v)
-            SetSetting("HideUsername", v)
-            UpdatePrivacyState()
-        end
-    })
-
-    Settings:Textbox({
-        Title = "Streamer Name",
-        Desc = "",
-        Placeholder = "Spoof Name",
-        Value = Globals.StreamerName or "",
-        ClearTextOnFocus = false,
-        Callback = function(value)
-            SetSetting("StreamerName", value or "")
-            UpdatePrivacyState()
-        end
-    })
-
-    Settings:Toggle({
-        Title = "Streamer Mode",
-        Desc = "",
-        Value = Globals.StreamerMode,
-        Callback = function(v)
-            SetSetting("StreamerMode", v)
-            UpdatePrivacyState()
-        end
-    })
-
-    Settings:Section({Title = "Tags"})
-    local tagOptions = collectTagOptions()
-    local tagValue = Globals.tagName or "None"
-    if not table.find(tagOptions, tagValue) then
-        tagValue = "None"
-    end
-    Settings:Dropdown({
-        Title = "Tag Changer",
-        Desc = "",
-        List = tagOptions,
-        Value = tagValue,
-        Callback = function(choice)
-            local selected = choice
-            if type(choice) == "table" then
-                selected = choice[1]
-            end
-            if not selected or selected == "" then
-                selected = "None"
-            end
-            SetSetting("tagName", selected)
-            if selected == "None" then
-                stopTagChanger()
-            else
-                startTagChanger()
-            end
-        end
-    })
-
-    Settings:Section({Title = "Webhook"})
-    Settings:Toggle({
-        Title = "Send Webhook",
-        Desc = "",
-        Value = Globals.SendWebhook,
-        Callback = function(v)
-            SetSetting("SendWebhook", v)
-        end
-    })
-
-    Settings:Button({
-        Title = "Test Webhook",
-        Callback = function()
-            if not Globals.WebhookURL or Globals.WebhookURL == "" then
-                return Window:Notify({Title = "Error", Desc = "Webhook URL is empty!", Time = 3, Type = "error"})
-            end
-
-            local success, response = pcall(function()
-                return SendRequest({
-                    Url = Globals.WebhookURL,
-                    Method = "POST",
-                    Headers = { ["Content-Type"] = "application/json" },
-                    Body = game:GetService("HttpService"):JSONEncode({["content"] = "Webhook Test"})
-                })
-            end)
-
-            if success and response.StatusCode >= 200 and response.StatusCode < 300 then
-                Window:Notify({
-                    Title = "ADS",
-                    Desc = "Webhook sent successfully and is working!",
-                    Time = 3,
-                    Type = "normal"
-                })
-            else
-                Window:Notify({
-                    Title = "Error",
-                    Desc = "Invalid Webhook, Discord returned an error.",
-                    Time = 5,
-                    Type = "error"
-                })
-            end
-        end
-    })
-
-    Settings:Textbox({
-        Title = "Webhook URL:",
-        Desc = "",
-        Placeholder = "https://discord.com/api/webhooks/...",
-        Value = Globals.WebhookURL,
-        ClearTextOnFocus = true,
-        Callback = function(value)
-            SetSetting("WebhookURL", value) 
-
-            if value ~= "" and value:find("https://discord.com/api/webhooks/") then
-                Window:Notify({
-                    Title = "ADS",
-                    Desc = "Webhook is successfully set!",
-                    Time = 3,
-                    Type = "normal"
-                })
-            end
-        end
-    })
-end
-
+-- Settings are consolidated in the Configuration tab.
 RunService.RenderStepped:Connect(function()
     if StackEnabled then
         if not StackSphere then
@@ -2616,17 +2463,162 @@ mouse.Button1Down:Connect(function()
     end
 end)
 
--- // currency tracking
-local StartCoins, CurrentTotalCoins, StartGems, CurrentTotalGems = 0, 0, 0, 0
-if GameState == "GAME" then
-    pcall(function()
-        repeat task.wait(1) until LocalPlayer:FindFirstChild("Coins")
-        StartCoins = LocalPlayer.Coins.Value
-        CurrentTotalCoins = StartCoins
-        StartGems = LocalPlayer.Gems.Value
-        CurrentTotalGems = StartGems
-    end)
+-- // session statistics and overlay
+local SessionStartedAt = os.clock()
+local SessionEarnedCoins = 0
+local SessionEarnedGems = 0
+local SessionWins = 0
+local SessionLosses = 0
+local LastMatchResult = "NO MATCHES YET"
+local LastMatchTime = "--"
+local LastProcessedMatchKey = nil
+
+local function FormatDuration(totalSeconds)
+    totalSeconds = math.max(0, math.floor(tonumber(totalSeconds) or 0))
+    local hours = math.floor(totalSeconds / 3600)
+    local minutes = math.floor((totalSeconds % 3600) / 60)
+    local seconds = totalSeconds % 60
+    return string.format("%02d:%02d:%02d", hours, minutes, seconds)
 end
+
+local function GetLocalPlayerReplicator()
+    local stateReplicators = ReplicatedStorage:FindFirstChild("StateReplicators")
+    if not stateReplicators then return nil end
+
+    for _, replicator in ipairs(stateReplicators:GetChildren()) do
+        if replicator.Name == "PlayerReplicator"
+        and replicator:GetAttribute("UserId") == LocalPlayer.UserId then
+            return replicator
+        end
+    end
+end
+
+local function ReadNumberStat(names)
+    local wanted = {}
+    for _, name in ipairs(names) do
+        wanted[string.lower(name):gsub("[^%w]", "")] = true
+
+        local valueObject = LocalPlayer:FindFirstChild(name)
+        if valueObject and valueObject.Value ~= nil then
+            local value = tonumber(valueObject.Value)
+            if value then return value end
+        end
+    end
+
+    for _, child in ipairs(LocalPlayer:GetChildren()) do
+        local normalized = string.lower(child.Name):gsub("[^%w]", "")
+        if wanted[normalized] and child.Value ~= nil then
+            local value = tonumber(child.Value)
+            if value then return value end
+        end
+    end
+
+    local replicator = GetLocalPlayerReplicator()
+    if replicator then
+        for attributeName, attributeValue in pairs(replicator:GetAttributes()) do
+            local normalized = string.lower(attributeName):gsub("[^%w]", "")
+            if wanted[normalized] then
+                local value = tonumber(attributeValue)
+                if value then return value end
+            end
+
+            if type(attributeValue) == "string" and attributeValue:sub(1, 1) == "{" then
+                local ok, decoded = pcall(HttpService.JSONDecode, HttpService, attributeValue)
+                if ok and type(decoded) == "table" then
+                    for key, nestedValue in pairs(decoded) do
+                        local nestedName = string.lower(tostring(key)):gsub("[^%w]", "")
+                        if wanted[nestedName] then
+                            local value = tonumber(nestedValue)
+                            if value then return value end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return 0
+end
+
+local function GetAccountStats()
+    return {
+        Money = ReadNumberStat({"Coins", "Money", "Cash"}),
+        Gems = ReadNumberStat({"Gems", "Gem"}),
+        Wins = ReadNumberStat({"Wins", "Win", "Triumphs"}),
+        Losses = ReadNumberStat({"Losses", "Loses", "Defeats", "Loss"})
+    }
+end
+
+local StatsGui = Instance.new("ScreenGui")
+StatsGui.Name = "ADS_SessionStats"
+StatsGui.ResetOnSpawn = false
+StatsGui.IgnoreGuiInset = false
+StatsGui.DisplayOrder = 999
+StatsGui.Parent = PlayerGui
+
+local StatsFrame = Instance.new("Frame")
+StatsFrame.Name = "Main"
+StatsFrame.Size = UDim2.fromOffset(300, 190)
+StatsFrame.Position = UDim2.new(0, 20, 0.5, -95)
+StatsFrame.BackgroundColor3 = Color3.fromRGB(18, 20, 27)
+StatsFrame.BackgroundTransparency = 0.08
+StatsFrame.BorderSizePixel = 0
+StatsFrame.Active = true
+StatsFrame.Draggable = true
+StatsFrame.Parent = StatsGui
+
+local StatsCorner = Instance.new("UICorner")
+StatsCorner.CornerRadius = UDim.new(0, 10)
+StatsCorner.Parent = StatsFrame
+
+local StatsStroke = Instance.new("UIStroke")
+StatsStroke.Color = Color3.fromRGB(76, 110, 245)
+StatsStroke.Transparency = 0.25
+StatsStroke.Thickness = 1.5
+StatsStroke.Parent = StatsFrame
+
+local StatsTitle = Instance.new("TextLabel")
+StatsTitle.Size = UDim2.new(1, -24, 0, 34)
+StatsTitle.Position = UDim2.fromOffset(12, 8)
+StatsTitle.BackgroundTransparency = 1
+StatsTitle.Font = Enum.Font.GothamBold
+StatsTitle.Text = "TDS SESSION STATS"
+StatsTitle.TextColor3 = Color3.fromRGB(235, 238, 255)
+StatsTitle.TextSize = 17
+StatsTitle.TextXAlignment = Enum.TextXAlignment.Left
+StatsTitle.Parent = StatsFrame
+
+local StatsText = Instance.new("TextLabel")
+StatsText.Size = UDim2.new(1, -24, 1, -52)
+StatsText.Position = UDim2.fromOffset(12, 44)
+StatsText.BackgroundTransparency = 1
+StatsText.Font = Enum.Font.GothamMedium
+StatsText.TextColor3 = Color3.fromRGB(210, 215, 230)
+StatsText.TextSize = 14
+StatsText.TextWrapped = true
+StatsText.TextXAlignment = Enum.TextXAlignment.Left
+StatsText.TextYAlignment = Enum.TextYAlignment.Top
+StatsText.Parent = StatsFrame
+
+local function UpdateSessionGui()
+    if not StatsText or not StatsText.Parent then return end
+    StatsText.Text = string.format(
+        "Runtime: %s\nMoney earned: %s\nGems earned: %s\nSession W/L: %s/%s\nLast game: %s\nGame time: %s",
+        FormatDuration(os.clock() - SessionStartedAt),
+        tostring(SessionEarnedCoins),
+        tostring(SessionEarnedGems),
+        tostring(SessionWins),
+        tostring(SessionLosses),
+        LastMatchResult,
+        LastMatchTime
+    )
+end
+
+task.spawn(function()
+    while task.wait(1) do
+        pcall(UpdateSessionGui)
+    end
+end)
 
 -- // check if remote returned valid
 local function CheckResOk(data)
@@ -2678,7 +2670,8 @@ local function GetAllRewards()
     local TopBanner = RewardsScreen and RewardsScreen:FindFirstChild("RewardBanner")
     if TopBanner and TopBanner:FindFirstChild("textLabel") then
         local txt = TopBanner.textLabel.Text:upper()
-        results.Status = txt:find("TRIUMPH") and "WIN" or (txt:find("LOST") and "LOSS" or "UNKNOWN")
+        results.Status = txt:find("TRIUMPH") and "WIN"
+            or ((txt:find("LOST") or txt:find("DEFEAT")) and "LOSS" or "UNKNOWN")
     end
 
     local LevelValue = LocalPlayer.Level
@@ -2811,80 +2804,70 @@ local function RejoinMatch()
     return res
 end
 
-local function HandlePostMatch(skipRejoin)
-    local UiRoot
-    repeat
-        task.wait(1)
-
-        local root = PlayerGui:FindFirstChild("ReactGameNewRewards")
-        local frame = root and root:FindFirstChild("Frame")
-        local gameOver = frame and frame:FindFirstChild("gameOver")
-        local RewardsScreen = gameOver and gameOver:FindFirstChild("RewardsScreen")
-        UiRoot = RewardsScreen and RewardsScreen:FindFirstChild("RewardsSection")
-    until UiRoot
-
-    if not UiRoot then 
-        if not skipRejoin then
-            return RejoinMatch() 
-        else
-            return
-        end
-    end
-    if not Globals.AutoRejoin and not Globals.AutoRestart then return end
-
+local function SendDiscordWebhook(match)
     if not Globals.SendWebhook then
-        if not skipRejoin then
-            RejoinMatch()
-        end
-        return
+        return true
     end
 
-    task.wait(1)
-
-    local match = GetAllRewards()
-
-    CurrentTotalCoins += match.Coins
-    CurrentTotalGems += match.Gems
-
-    local BonusString = ""
-    if #match.Others > 0 then
-        for _, res in ipairs(match.Others) do
-            BonusString = BonusString .. "🎁 **" .. res.Amount .. " " .. res.Name .. "**\n"
-        end
-    else
-        BonusString = "_No bonus rewards found._"
+    if type(Globals.WebhookURL) ~= "string" or Globals.WebhookURL == "" then
+        warn("[Webhook] SendWebhook is enabled, but WebhookURL is empty.")
+        return false
     end
 
-    local PostData = {
+    local account = GetAccountStats()
+    local itemText = "No items found in this match"
+
+    if match.Status == "WIN" and #match.Others > 0 then
+        local itemLines = {}
+        for _, item in ipairs(match.Others) do
+            itemLines[#itemLines + 1] = string.format("• %s %s", tostring(item.Amount), tostring(item.Name))
+        end
+        itemText = table.concat(itemLines, "\n")
+    end
+
+    local resultText = match.Status == "WIN" and "WIN" or ("LOSE [wave " .. tostring(match.Wave) .. "]")
+    local postData = {
         username = "TDS AutoStrat",
         embeds = {{
-            title = (match.Status == "WIN" and "🏆 TRIUMPH" or "💀 DEFEAT"),
-            color = (match.Status == "WIN" and 0x2ecc71 or 0xe74c3c),
-            description =
-                "### 📋 Match Overview\n" ..
-                "> **Status:** `" .. match.Status .. "`\n" ..
-                "> **Time:** `" .. match.Time .. "`\n" ..
-                "> **Current Level:** `" .. match.Level .. "`\n" ..
-                "> **Wave:** `" .. match.Wave .. "`\n",
-
+            title = match.Status == "WIN" and "🏆 TRIUMPH" or "💀 DEFEAT",
+            color = match.Status == "WIN" and 0x2ecc71 or 0xe74c3c,
+            description = string.format(
+                "**Result:** `%s`\n**Finished in:** `%s`\n**Wave:** `%s`\n**Level:** `%s`",
+                resultText,
+                tostring(match.Time),
+                tostring(match.Wave),
+                tostring(match.Level)
+            ),
             fields = {
                 {
-                    name = "✨ Rewards",
-                    value = "```ansi\n" ..
-                            "[2;33mCoins:[0m +" .. match.Coins .. "\n" ..
-                            "[2;34mGems: [0m +" .. match.Gems .. "\n" ..
-                            "[2;32mXP:   [0m +" .. match.XP .. "```",
+                    name = "Match rewards",
+                    value = string.format("Money: **+%s**\nGems: **+%s**\nXP: **+%s**", match.Coins, match.Gems, match.XP),
+                    inline = true
+                },
+                {
+                    name = "Current account totals",
+                    value = string.format(
+                        "Money: **%s**\nGems: **%s**\nWins: **%s**\nLosses: **%s**",
+                        account.Money, account.Gems, account.Wins, account.Losses
+                    ),
+                    inline = true
+                },
+                {
+                    name = "Items",
+                    value = itemText,
                     inline = false
                 },
                 {
-                    name = "🎁 Bonus Items",
-                    value = BonusString,
-                    inline = true
-                },
-                {
-                    name = "📊 Session Totals",
-                    value = "```py\n# Total Amount\nCoins: " .. CurrentTotalCoins .. "\nGems:  " .. CurrentTotalGems .. "```",
-                    inline = true
+                    name = "Session",
+                    value = string.format(
+                        "Runtime: **%s**\nMoney earned: **%s**\nGems earned: **%s**\nW/L: **%s/%s**",
+                        FormatDuration(os.clock() - SessionStartedAt),
+                        SessionEarnedCoins,
+                        SessionEarnedGems,
+                        SessionWins,
+                        SessionLosses
+                    ),
+                    inline = false
                 }
             },
             footer = { text = "Logged for " .. LocalPlayer.Name .. " • TDS AutoStrat" },
@@ -2892,22 +2875,78 @@ local function HandlePostMatch(skipRejoin)
         }}
     }
 
-    pcall(function()
-        SendRequest({
+    local ok, response = pcall(function()
+        return SendRequest({
             Url = Globals.WebhookURL,
             Method = "POST",
             Headers = { ["Content-Type"] = "application/json" },
-            Body = game:GetService("HttpService"):JSONEncode(PostData)
+            Body = HttpService:JSONEncode(postData)
         })
     end)
 
-    task.wait(1.5)
-
-    if not skipRejoin then
-        RejoinMatch()
+    if not ok then
+        warn("[Webhook] Request failed:", response)
+        return false
     end
 
-    task.wait(9e9)
+    local statusCode = response and (response.StatusCode or response.Status)
+    if statusCode and (statusCode < 200 or statusCode >= 300) then
+        warn("[Webhook] Discord returned HTTP", statusCode, response.Body or "")
+        return false
+    end
+
+    return true
+end
+
+local function HandlePostMatch(skipRejoin)
+    local rewardsSection
+    local rewardsScreen
+    local waitStarted = os.clock()
+
+    repeat
+        task.wait(0.25)
+        local root = PlayerGui:FindFirstChild("ReactGameNewRewards")
+        local frame = root and root:FindFirstChild("Frame")
+        local gameOver = frame and frame:FindFirstChild("gameOver")
+        rewardsScreen = gameOver and gameOver:FindFirstChild("RewardsScreen")
+        rewardsSection = rewardsScreen and rewardsScreen:FindFirstChild("RewardsSection")
+    until rewardsSection or os.clock() - waitStarted >= 30
+
+    if not rewardsSection then
+        warn("[PostMatch] Rewards screen was not found within 30 seconds.")
+        if not skipRejoin then
+            return RejoinMatch()
+        end
+        return false
+    end
+
+    task.wait(1)
+    local match = GetAllRewards()
+    local matchKey = table.concat({match.Status, match.Time, tostring(match.Wave), tostring(match.Coins), tostring(match.Gems)}, "|")
+
+    if LastProcessedMatchKey ~= matchKey then
+        LastProcessedMatchKey = matchKey
+        SessionEarnedCoins += tonumber(match.Coins) or 0
+        SessionEarnedGems += tonumber(match.Gems) or 0
+
+        if match.Status == "WIN" then
+            SessionWins += 1
+            LastMatchResult = "WIN"
+        else
+            SessionLosses += 1
+            LastMatchResult = "LOSE [wave " .. tostring(match.Wave) .. "]"
+        end
+
+        LastMatchTime = tostring(match.Time)
+        UpdateSessionGui()
+        SendDiscordWebhook(match)
+    end
+
+    if not skipRejoin then
+        return RejoinMatch()
+    end
+
+    return true
 end
 
 local function MatchReadyUp()
@@ -3210,70 +3249,24 @@ StartTimeScale = function()
 end
 
 -- // ingame control
-local CachedPlayAgainCallback
-
-local function FindPlayAgainCallback()
-    if type(CachedPlayAgainCallback) == "function" then
-        return CachedPlayAgainCallback
-    end
-
-    if type(getgc) ~= "function"
-        or type(islclosure) ~= "function"
-        or not debug
-        or type(debug.getinfo) ~= "function"
-        or type(debug.getupvalues) ~= "function" then
-        return nil
-    end
-
-    for _, closure in ipairs(getgc(true)) do
-        if type(closure) == "function" and islclosure(closure) then
-            local okInfo, info = pcall(debug.getinfo, closure)
-
-            if okInfo
-                and info
-                and info.source == "=ReplicatedStorage.Client.Interfaces.Game.Components.NewRewards"
-                and info.name == "clicked" then
-
-                local okUpvalues, upvalues = pcall(debug.getupvalues, closure)
-                local state = okUpvalues and upvalues and upvalues[1]
-
-                if type(state) == "table" and type(state.playAgainClicked) == "function" then
-                    CachedPlayAgainCallback = state.playAgainClicked
-                    return CachedPlayAgainCallback
-                end
-            end
-        end
-    end
-
-    return nil
-end
-
 local function TriggerRestart()
-    local rewardsScreen
+    local UiRoot = PlayerGui:WaitForChild("ReactGameNewRewards")
+    local FoundSection = false
 
     repeat
         task.wait(0.3)
+        local f = UiRoot:FindFirstChild("Frame")
+        local g = f and f:FindFirstChild("gameOver")
+        local s = g and g:FindFirstChild("RewardsScreen")
+        if s and s:FindFirstChild("RewardsSection") then
+            FoundSection = true
+        end
+    until FoundSection
 
-        local root = PlayerGui:FindFirstChild("ReactGameNewRewards")
-        local frame = root and root:FindFirstChild("Frame")
-        local gameOver = frame and frame:FindFirstChild("gameOver")
-        rewardsScreen = gameOver and gameOver:FindFirstChild("RewardsScreen")
-    until (rewardsScreen and rewardsScreen:FindFirstChild("RewardsSection"))
-        or (not Globals.AutoRestart and not Globals.AutoRejoin)
-
-    local callback = FindPlayAgainCallback()
-    if type(callback) ~= "function" then
-        return false
-    end
-
-    local ok = pcall(callback)
-    if not ok then
-        CachedPlayAgainCallback = nil
-        return false
-    end
-
-    return true
+    task.wait(3)
+    RunVoteSkip()
 end
+
 local function GetCurrentWave()
     local label
 
@@ -4232,59 +4225,55 @@ function StartBackToLobby()
 
     task.spawn(function()
         local stateReplicators = ReplicatedStorage:WaitForChild("StateReplicators", 30)
-        local gameStateReplicator = stateReplicators
-            and stateReplicators:WaitForChild("GameStateReplicator", 30)
+        local gameStateReplicator = stateReplicators and stateReplicators:WaitForChild("GameStateReplicator", 30)
 
         if not gameStateReplicator then
+            warn("[PostMatch] GameStateReplicator was not found.")
             BackToLobbyRunning = false
-            pcall(HandlePostMatch)
             return
         end
 
         while Globals.AutoRejoin or Globals.AutoRestart do
-            if gameStateReplicator:GetAttribute("GameOver") == true then
-                local health = gameStateReplicator:GetAttribute("Health") or 0
+            local isGameOver = gameStateReplicator:GetAttribute("GameOver") == true
 
-                if health > 0 then
-                    -- Victory: keep the existing Auto Rejoin behavior.
-                    if Globals.AutoRejoin then
-                        if isfile("ADS_LastStrat.lua") then
-                            pcall(delfile, "ADS_LastStrat.lua")
-                        end
+            if isGameOver then
+                local health = tonumber(gameStateReplicator:GetAttribute("Health")) or 0
+                local won = health > 0
 
-                        pcall(HandlePostMatch)
-                        break
+                if won and Globals.AutoRejoin then
+                    if isfile("ADS_LastStrat.lua") then
+                        pcall(delfile, "ADS_LastStrat.lua")
                     end
-                else
-                    -- Defeat: the old Restart? vote no longer exists.
-                    -- Keep ADS_LastStrat.lua, process rewards, then start a new match.
-                    if Globals.AutoRestart then
-                        task.spawn(pcall, HandlePostMatch, true)
-                        task.wait(1)
+                    pcall(HandlePostMatch, false)
+                    break
+                elseif not won and Globals.AutoRestart then
+                    -- Collect statistics/webhook first, then queue the same mode again.
+                    pcall(HandlePostMatch, true)
+                    task.wait(1)
 
-                        local ok = pcall(RejoinMatch)
-                        if not ok then
-                            pcall(SmartTeleportToLobby)
-                        end
-
-                        break
-                    elseif Globals.AutoRejoin then
-                        if isfile("ADS_LastStrat.lua") then
-                            pcall(delfile, "ADS_LastStrat.lua")
-                        end
-
-                        pcall(HandlePostMatch)
-                        break
+                    local ok = pcall(RejoinMatch)
+                    if not ok then
+                        pcall(SmartTeleportToLobby)
                     end
+                    break
+                elseif Globals.AutoRejoin then
+                    if isfile("ADS_LastStrat.lua") then
+                        pcall(delfile, "ADS_LastStrat.lua")
+                    end
+                    pcall(HandlePostMatch, false)
+                    break
                 end
+            else
+                LastProcessedMatchKey = nil
             end
 
-            task.wait(1)
+            task.wait(0.5)
         end
 
         BackToLobbyRunning = false
     end)
 end
+
 local function StartAntiLag()
     if AntiLagRunning then return end
     AntiLagRunning = true
