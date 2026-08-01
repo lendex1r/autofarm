@@ -166,12 +166,69 @@ end
 
 StartAntiAfk()
 
-local SendRequest = request or http_request or httprequest
-    or GetDevice and GetDevice().request
+local RequestCandidates = {}
 
-if not SendRequest then 
-    warn("failure: no http function") 
-    return 
+local function AddRequestCandidate(name, fn, owner)
+    if type(fn) == "function" then
+        RequestCandidates[#RequestCandidates + 1] = {
+            Name = name,
+            Function = fn,
+            Owner = owner
+        }
+    end
+end
+
+AddRequestCandidate("request", request)
+AddRequestCandidate("http_request", http_request)
+AddRequestCandidate("httprequest", httprequest)
+
+if type(getgenv) == "function" then
+    local env = getgenv()
+    AddRequestCandidate("getgenv().request", env and env.request)
+    AddRequestCandidate("getgenv().http_request", env and env.http_request)
+end
+
+if type(syn) == "table" then
+    AddRequestCandidate("syn.request", syn.request, syn)
+end
+
+if type(fluxus) == "table" then
+    AddRequestCandidate("fluxus.request", fluxus.request, fluxus)
+end
+
+if type(http) == "table" then
+    AddRequestCandidate("http.request", http.request, http)
+end
+
+if type(GetDevice) == "function" then
+    local ok, device = pcall(GetDevice)
+    if ok and type(device) == "table" then
+        AddRequestCandidate("GetDevice().request", device.request, device)
+    end
+end
+
+local function PerformHttpRequest(payload)
+    local errors = {}
+
+    for _, candidate in ipairs(RequestCandidates) do
+        local ok, response = pcall(candidate.Function, payload)
+
+        if not ok and candidate.Owner then
+            ok, response = pcall(candidate.Function, candidate.Owner, payload)
+        end
+
+        if ok and response ~= nil then
+            return true, response, candidate.Name
+        end
+
+        errors[#errors + 1] = candidate.Name .. ": " .. tostring(response)
+    end
+
+    return false, nil, table.concat(errors, " | ")
+end
+
+if #RequestCandidates == 0 then
+    warn("[HTTP] No supported request function was found. Discord webhooks will be unavailable.")
 end
 
 local BackToLobbyRunning = false
@@ -2124,28 +2181,34 @@ local Configuration = Window:Tab({Title = "Configuration", Icon = "sliders-horiz
             url = url:match("^%s*(.-)%s*$") or ""
             url = url:gsub("discordapp%.com", "discord.com")
             if url == "" then
-                return Window:Notify({Title = "Error", Desc = "Webhook URL is empty!", Time = 4, Type = "error"})
+                warn("[Webhook Test] Webhook URL is empty.")
+                return
             end
             if not url:match("^https://[^/]*discord%.com/api/webhooks/%d+/[%w%-%_]+") then
-                return Window:Notify({Title = "Error", Desc = "Webhook URL format is invalid.", Time = 6, Type = "error"})
+                warn("[Webhook Test] Webhook URL format is invalid:", url)
+                return
             end
+
             SetSetting("WebhookURL", url)
             local requestUrl = url .. (url:find("?", 1, true) and "&wait=true" or "?wait=true")
-            local success, response = pcall(function()
-                return SendRequest({
-                    Url = requestUrl,
-                    Method = "POST",
-                    Headers = {["Content-Type"] = "application/json", ["Accept"] = "application/json"},
-                    Body = HttpService:JSONEncode({content = "ADS webhook test: connection successful."})
-                })
-            end)
+            local success, response, provider = PerformHttpRequest({
+                Url = requestUrl,
+                URL = requestUrl,
+                url = requestUrl,
+                Method = "POST",
+                method = "POST",
+                Headers = {["Content-Type"] = "application/json", ["Accept"] = "application/json"},
+                headers = {["Content-Type"] = "application/json", ["Accept"] = "application/json"},
+                Body = HttpService:JSONEncode({content = "ADS webhook test: connection successful."}),
+                body = HttpService:JSONEncode({content = "ADS webhook test: connection successful."})
+            })
+
             local code = response and tonumber(response.StatusCode or response.Status or response.status_code)
-            local body = response and tostring(response.Body or response.body or "") or tostring(response)
+            local body = response and tostring(response.Body or response.body or "") or ""
             if success and (not code or (code >= 200 and code < 300)) then
-                Window:Notify({Title = "ADS", Desc = "Webhook sent successfully!", Time = 4, Type = "normal"})
+                print("[Webhook Test] sent successfully through", provider, "status=", code or "unknown")
             else
-                warn("[Webhook Test] success=", success, "status=", code, "body=", body)
-                Window:Notify({Title = "Webhook Error", Desc = "HTTP " .. tostring(code or "request failed") .. ". Check console.", Time = 8, Type = "error"})
+                warn("[Webhook Test] failed. provider/errors=", provider, "status=", code, "body=", body)
             end
         end
     })
@@ -2474,10 +2537,10 @@ local LastMatchResult = "NO MATCHES YET"
 local LastMatchTime = "--"
 local LastProcessedMatchKey = nil
 
-local function LoadSessionState()
-    if not isfile or not readfile or not isfile(SessionFileName) then return end
-    local ok, data = pcall(function() return HttpService:JSONDecode(readfile(SessionFileName)) end)
-    if not ok or type(data) ~= "table" then return end
+local SessionTeleportKey = "ADS_SessionStats_v2"
+
+local function ApplySessionData(data)
+    if type(data) ~= "table" then return false end
     SessionStartedAt = tonumber(data.StartedAt) or SessionStartedAt
     SessionEarnedCoins = tonumber(data.EarnedCoins) or 0
     SessionEarnedGems = tonumber(data.EarnedGems) or 0
@@ -2486,13 +2549,44 @@ local function LoadSessionState()
     LastMatchResult = tostring(data.LastResult or LastMatchResult)
     LastMatchTime = tostring(data.LastTime or LastMatchTime)
     LastProcessedMatchKey = data.LastMatchKey
+    return true
+end
+
+local function LoadSessionState()
+    local teleportLoaded = false
+    pcall(function()
+        local data = TeleportService:GetTeleportSetting(SessionTeleportKey)
+        teleportLoaded = ApplySessionData(data)
+    end)
+
+    if teleportLoaded then return end
+    if not isfile or not readfile or not isfile(SessionFileName) then return end
+    local ok, data = pcall(function() return HttpService:JSONDecode(readfile(SessionFileName)) end)
+    if not ok or type(data) ~= "table" then return end
+    ApplySessionData(data)
 end
 
 local function SaveSessionState()
-    if not writefile then return end
+    local data = {
+        StartedAt = SessionStartedAt,
+        EarnedCoins = SessionEarnedCoins,
+        EarnedGems = SessionEarnedGems,
+        Wins = SessionWins,
+        Losses = SessionLosses,
+        LastResult = LastMatchResult,
+        LastTime = LastMatchTime,
+        LastMatchKey = LastProcessedMatchKey
+    }
+
     pcall(function()
-        writefile(SessionFileName, HttpService:JSONEncode({StartedAt=SessionStartedAt,EarnedCoins=SessionEarnedCoins,EarnedGems=SessionEarnedGems,Wins=SessionWins,Losses=SessionLosses,LastResult=LastMatchResult,LastTime=LastMatchTime,LastMatchKey=LastProcessedMatchKey}))
+        TeleportService:SetTeleportSetting(SessionTeleportKey, data)
     end)
+
+    if writefile then
+        pcall(function()
+            writefile(SessionFileName, HttpService:JSONEncode(data))
+        end)
+    end
 end
 LoadSessionState()
 
@@ -2568,7 +2662,8 @@ local function GetAccountStats()
         Money = ReadNumberStat({"Coins", "Money", "Cash"}),
         Gems = ReadNumberStat({"Gems", "Gem"}),
         Wins = ReadNumberStat({"Wins", "Win", "Triumphs"}),
-        Losses = ReadNumberStat({"Losses", "Loses", "Defeats", "Loss"})
+        Losses = ReadNumberStat({"Losses", "Loses", "Defeats", "Loss"}),
+        Level = ReadNumberStat({"Level", "CurrentLevel", "PlayerLevel"})
     }
 end
 
@@ -2581,8 +2676,8 @@ StatsGui.Parent = PlayerGui
 
 local StatsFrame = Instance.new("Frame")
 StatsFrame.Name = "Main"
-StatsFrame.Size = UDim2.fromOffset(300, 190)
-StatsFrame.Position = UDim2.new(0, 20, 0.5, -95)
+StatsFrame.Size = UDim2.fromOffset(320, 250)
+StatsFrame.Position = UDim2.new(0, 20, 0.5, -125)
 StatsFrame.BackgroundColor3 = Color3.fromRGB(18, 20, 27)
 StatsFrame.BackgroundTransparency = 0.08
 StatsFrame.BorderSizePixel = 0
@@ -2626,14 +2721,30 @@ StatsText.Parent = StatsFrame
 
 local function UpdateSessionGui()
     if not StatsText or not StatsText.Parent then return end
+    local account = GetAccountStats()
     StatsText.Text = string.format(
         '<font color="#166E37">Runtime: %s</font>\n' ..
         '<font color="#A67C00">Money earned: %s</font>\n' ..
         '<font color="#7D3CCF">Gems earned: %s</font>\n' ..
+        '<font color="#166E37">Account money: %s</font>\n' ..
+        '<font color="#166E37">Account gems: %s</font>\n' ..
+        '<font color="#166E37">Account level: %s</font>\n' ..
+        '<font color="#166E37">Account W/L: %s/%s</font>\n' ..
         '<font color="#166E37">Session W/L: %s/%s</font>\n' ..
         '<font color="#166E37">Last game: %s</font>\n' ..
         '<font color="#166E37">Game time: %s</font>',
-        FormatDuration(os.time() - SessionStartedAt), tostring(SessionEarnedCoins), tostring(SessionEarnedGems), tostring(SessionWins), tostring(SessionLosses), LastMatchResult, LastMatchTime
+        FormatDuration(os.time() - SessionStartedAt),
+        tostring(SessionEarnedCoins),
+        tostring(SessionEarnedGems),
+        tostring(account.Money),
+        tostring(account.Gems),
+        tostring(account.Level),
+        tostring(account.Wins),
+        tostring(account.Losses),
+        tostring(SessionWins),
+        tostring(SessionLosses),
+        LastMatchResult,
+        LastMatchTime
     )
 end
 
@@ -2899,17 +3010,22 @@ local function SendDiscordWebhook(match)
         }}
     }
 
-    local ok, response = pcall(function()
-        return SendRequest({
-            Url = webhookUrl .. (webhookUrl:find("?", 1, true) and "&wait=true" or "?wait=true"),
-            Method = "POST",
-            Headers = { ["Content-Type"] = "application/json", ["Accept"] = "application/json" },
-            Body = HttpService:JSONEncode(postData)
-        })
-    end)
+    local requestUrl = webhookUrl .. (webhookUrl:find("?", 1, true) and "&wait=true" or "?wait=true")
+    local encodedBody = HttpService:JSONEncode(postData)
+    local ok, response, provider = PerformHttpRequest({
+        Url = requestUrl,
+        URL = requestUrl,
+        url = requestUrl,
+        Method = "POST",
+        method = "POST",
+        Headers = { ["Content-Type"] = "application/json", ["Accept"] = "application/json" },
+        headers = { ["Content-Type"] = "application/json", ["Accept"] = "application/json" },
+        Body = encodedBody,
+        body = encodedBody
+    })
 
     if not ok then
-        warn("[Webhook] Request failed:", response)
+        warn("[Webhook] Request failed:", provider)
         return false
     end
 
@@ -2917,6 +3033,7 @@ local function SendDiscordWebhook(match)
     local responseBody = response and tostring(response.Body or response.body or "") or ""
     if statusCode and (statusCode < 200 or statusCode >= 300) then warn("[Webhook] Discord returned HTTP", statusCode, responseBody) return false end
     if response and response.Success == false then warn("[Webhook] Request API reported failure:", responseBody) return false end
+    print("[Webhook] Sent through", provider, "status=", statusCode or "unknown")
     return true
 end
 
@@ -3397,13 +3514,71 @@ local function DoActivateAbility(TObj, AbName, AbData, IsLooping)
         elseif chosenPosition then data.towerPosition = chosenPosition end
         return next(data) and data or nil
     end
+    local function describe(value)
+        if type(value) == "table" then
+            local ok, encoded = pcall(HttpService.JSONEncode, HttpService, value)
+            if ok then return encoded end
+        end
+        return tostring(value)
+    end
+
     local function attempt()
-        for tries=1,20 do
-            local ok,res=pcall(function() return RemoteFunc:InvokeServer("Troops","Abilities","Activate",{Troop=TObj,Name=AbName,Data=buildData()}) end)
+        local data = buildData()
+
+        if isHologram then
+            print("[Hacker Hologram] hackerIndexObject=", TObj:GetFullName())
+            print("[Hacker Hologram] abilityName=", tostring(AbName))
+            print("[Hacker Hologram] payloadData=", describe(data))
+
+            local variants = {
+                {"Troops", "Abilities", "Activate", {Troop=TObj, Name=AbName, Data=data}},
+                {"Troops", "Ability", "Activate", {Troop=TObj, Name=AbName, Data=data}},
+                {"Troops", "Abilities", "Activate", {Troop=TObj, Ability=AbName, Data=data}},
+                {"Troops", "Abilities", AbName, {Troop=TObj, Data=data}}
+            }
+
+            for variantIndex, args in ipairs(variants) do
+                local beforeCount = workspace:FindFirstChild("Towers") and #workspace.Towers:GetChildren() or 0
+                local ok, res = pcall(function()
+                    return RemoteFunc:InvokeServer(unpack(args))
+                end)
+                task.wait(0.75)
+                local afterCount = workspace:FindFirstChild("Towers") and #workspace.Towers:GetChildren() or beforeCount
+
+                print(
+                    "[Hacker Hologram] variant=", variantIndex,
+                    "ok=", ok,
+                    "responseType=", typeof(res),
+                    "response=", describe(res),
+                    "towersBefore=", beforeCount,
+                    "towersAfter=", afterCount
+                )
+
+                if ok and (CheckResOk(res) or afterCount > beforeCount) then
+                    return true
+                end
+            end
+
+            warn("[Hacker Hologram] All known request formats failed. Copy every '[Hacker Hologram]' console line and send it for analysis.")
+            return false
+        end
+
+        for tries = 1, 20 do
+            local ok, res = pcall(function()
+                return RemoteFunc:InvokeServer("Troops", "Abilities", "Activate", {
+                    Troop = TObj,
+                    Name = AbName,
+                    Data = data
+                })
+            end)
+
             if ok and (CheckResOk(res) or res == nil) then return true end
-            if tries==1 or tries%5==0 then warn("[Ability]",tostring(AbName),"attempt",tries,"failed:",tostring(res)) end
+            if tries == 1 or tries % 5 == 0 then
+                warn("[Ability]", tostring(AbName), "attempt", tries, "failed:", describe(res))
+            end
             task.wait(0.35)
         end
+
         return false
     end
     if IsLooping then
