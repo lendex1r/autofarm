@@ -2120,45 +2120,45 @@ local Configuration = Window:Tab({Title = "Configuration", Icon = "sliders-horiz
     Configuration:Button({
         Title = "Test Webhook",
         Callback = function()
-            if not Globals.WebhookURL or Globals.WebhookURL == "" then
-                return Window:Notify({Title = "Error", Desc = "Webhook URL is empty!", Time = 3, Type = "error"})
+            local url = type(Globals.WebhookURL) == "string" and Globals.WebhookURL or ""
+            url = url:match("^%s*(.-)%s*$") or ""
+            url = url:gsub("discordapp%.com", "discord.com")
+            if url == "" then
+                return Window:Notify({Title = "Error", Desc = "Webhook URL is empty!", Time = 4, Type = "error"})
             end
-
+            if not url:match("^https://[^/]*discord%.com/api/webhooks/%d+/[%w%-%_]+") then
+                return Window:Notify({Title = "Error", Desc = "Webhook URL format is invalid.", Time = 6, Type = "error"})
+            end
+            SetSetting("WebhookURL", url)
+            local requestUrl = url .. (url:find("?", 1, true) and "&wait=true" or "?wait=true")
             local success, response = pcall(function()
                 return SendRequest({
-                    Url = Globals.WebhookURL,
+                    Url = requestUrl,
                     Method = "POST",
-                    Headers = { ["Content-Type"] = "application/json" },
-                    Body = game:GetService("HttpService"):JSONEncode({["content"] = "Webhook Test"})
+                    Headers = {["Content-Type"] = "application/json", ["Accept"] = "application/json"},
+                    Body = HttpService:JSONEncode({content = "ADS webhook test: connection successful."})
                 })
             end)
-
-            if success and response.StatusCode >= 200 and response.StatusCode < 300 then
-                Window:Notify({
-                    Title = "ADS",
-                    Desc = "Webhook sent successfully and is working!",
-                    Time = 3,
-                    Type = "normal"
-                })
+            local code = response and tonumber(response.StatusCode or response.Status or response.status_code)
+            local body = response and tostring(response.Body or response.body or "") or tostring(response)
+            if success and (not code or (code >= 200 and code < 300)) then
+                Window:Notify({Title = "ADS", Desc = "Webhook sent successfully!", Time = 4, Type = "normal"})
             else
-                Window:Notify({
-                    Title = "Error",
-                    Desc = "Invalid Webhook, Discord returned an error.",
-                    Time = 5,
-                    Type = "error"
-                })
+                warn("[Webhook Test] success=", success, "status=", code, "body=", body)
+                Window:Notify({Title = "Webhook Error", Desc = "HTTP " .. tostring(code or "request failed") .. ". Check console.", Time = 8, Type = "error"})
             end
         end
     })
-
     Configuration:Textbox({
         Title = "Webhook URL:",
         Desc = "",
         Placeholder = "https://discord.com/api/webhooks/...",
         Value = Globals.WebhookURL,
-        ClearTextOnFocus = true,
+        ClearTextOnFocus = false,
         Callback = function(value)
-            SetSetting("WebhookURL", value) 
+            value = type(value) == "string" and (value:match("^%s*(.-)%s*$") or "") or ""
+            value = value:gsub("discordapp%.com", "discord.com")
+            SetSetting("WebhookURL", value)
 
             if value ~= "" and value:find("https://discord.com/api/webhooks/") then
                 Window:Notify({
@@ -2463,8 +2463,9 @@ mouse.Button1Down:Connect(function()
     end
 end)
 
--- // session statistics and overlay
-local SessionStartedAt = os.clock()
+-- // persistent session statistics and overlay
+local SessionFileName = "ADS_SessionStats.json"
+local SessionStartedAt = os.time()
 local SessionEarnedCoins = 0
 local SessionEarnedGems = 0
 local SessionWins = 0
@@ -2472,6 +2473,28 @@ local SessionLosses = 0
 local LastMatchResult = "NO MATCHES YET"
 local LastMatchTime = "--"
 local LastProcessedMatchKey = nil
+
+local function LoadSessionState()
+    if not isfile or not readfile or not isfile(SessionFileName) then return end
+    local ok, data = pcall(function() return HttpService:JSONDecode(readfile(SessionFileName)) end)
+    if not ok or type(data) ~= "table" then return end
+    SessionStartedAt = tonumber(data.StartedAt) or SessionStartedAt
+    SessionEarnedCoins = tonumber(data.EarnedCoins) or 0
+    SessionEarnedGems = tonumber(data.EarnedGems) or 0
+    SessionWins = tonumber(data.Wins) or 0
+    SessionLosses = tonumber(data.Losses) or 0
+    LastMatchResult = tostring(data.LastResult or LastMatchResult)
+    LastMatchTime = tostring(data.LastTime or LastMatchTime)
+    LastProcessedMatchKey = data.LastMatchKey
+end
+
+local function SaveSessionState()
+    if not writefile then return end
+    pcall(function()
+        writefile(SessionFileName, HttpService:JSONEncode({StartedAt=SessionStartedAt,EarnedCoins=SessionEarnedCoins,EarnedGems=SessionEarnedGems,Wins=SessionWins,Losses=SessionLosses,LastResult=LastMatchResult,LastTime=LastMatchTime,LastMatchKey=LastProcessedMatchKey}))
+    end)
+end
+LoadSessionState()
 
 local function FormatDuration(totalSeconds)
     totalSeconds = math.max(0, math.floor(tonumber(totalSeconds) or 0))
@@ -2593,8 +2616,9 @@ StatsText.Size = UDim2.new(1, -24, 1, -52)
 StatsText.Position = UDim2.fromOffset(12, 44)
 StatsText.BackgroundTransparency = 1
 StatsText.Font = Enum.Font.GothamMedium
-StatsText.TextColor3 = Color3.fromRGB(210, 215, 230)
+StatsText.TextColor3 = Color3.fromRGB(22, 110, 55)
 StatsText.TextSize = 14
+StatsText.RichText = true
 StatsText.TextWrapped = true
 StatsText.TextXAlignment = Enum.TextXAlignment.Left
 StatsText.TextYAlignment = Enum.TextYAlignment.Top
@@ -2603,14 +2627,13 @@ StatsText.Parent = StatsFrame
 local function UpdateSessionGui()
     if not StatsText or not StatsText.Parent then return end
     StatsText.Text = string.format(
-        "Runtime: %s\nMoney earned: %s\nGems earned: %s\nSession W/L: %s/%s\nLast game: %s\nGame time: %s",
-        FormatDuration(os.clock() - SessionStartedAt),
-        tostring(SessionEarnedCoins),
-        tostring(SessionEarnedGems),
-        tostring(SessionWins),
-        tostring(SessionLosses),
-        LastMatchResult,
-        LastMatchTime
+        '<font color="#166E37">Runtime: %s</font>\n' ..
+        '<font color="#A67C00">Money earned: %s</font>\n' ..
+        '<font color="#7D3CCF">Gems earned: %s</font>\n' ..
+        '<font color="#166E37">Session W/L: %s/%s</font>\n' ..
+        '<font color="#166E37">Last game: %s</font>\n' ..
+        '<font color="#166E37">Game time: %s</font>',
+        FormatDuration(os.time() - SessionStartedAt), tostring(SessionEarnedCoins), tostring(SessionEarnedGems), tostring(SessionWins), tostring(SessionLosses), LastMatchResult, LastMatchTime
     )
 end
 
@@ -2809,10 +2832,11 @@ local function SendDiscordWebhook(match)
         return true
     end
 
-    if type(Globals.WebhookURL) ~= "string" or Globals.WebhookURL == "" then
-        warn("[Webhook] SendWebhook is enabled, but WebhookURL is empty.")
-        return false
-    end
+    local webhookUrl = type(Globals.WebhookURL) == "string" and Globals.WebhookURL or ""
+    webhookUrl = webhookUrl:match("^%s*(.-)%s*$") or ""
+    webhookUrl = webhookUrl:gsub("discordapp%.com", "discord.com")
+    if webhookUrl == "" then warn("[Webhook] URL is empty.") return false end
+    if not webhookUrl:match("^https://[^/]*discord%.com/api/webhooks/%d+/[%w%-%_]+") then warn("[Webhook] Invalid URL format:", webhookUrl) return false end
 
     local account = GetAccountStats()
     local itemText = "No items found in this match"
@@ -2861,7 +2885,7 @@ local function SendDiscordWebhook(match)
                     name = "Session",
                     value = string.format(
                         "Runtime: **%s**\nMoney earned: **%s**\nGems earned: **%s**\nW/L: **%s/%s**",
-                        FormatDuration(os.clock() - SessionStartedAt),
+                        FormatDuration(os.time() - SessionStartedAt),
                         SessionEarnedCoins,
                         SessionEarnedGems,
                         SessionWins,
@@ -2877,9 +2901,9 @@ local function SendDiscordWebhook(match)
 
     local ok, response = pcall(function()
         return SendRequest({
-            Url = Globals.WebhookURL,
+            Url = webhookUrl .. (webhookUrl:find("?", 1, true) and "&wait=true" or "?wait=true"),
             Method = "POST",
-            Headers = { ["Content-Type"] = "application/json" },
+            Headers = { ["Content-Type"] = "application/json", ["Accept"] = "application/json" },
             Body = HttpService:JSONEncode(postData)
         })
     end)
@@ -2889,12 +2913,10 @@ local function SendDiscordWebhook(match)
         return false
     end
 
-    local statusCode = response and (response.StatusCode or response.Status)
-    if statusCode and (statusCode < 200 or statusCode >= 300) then
-        warn("[Webhook] Discord returned HTTP", statusCode, response.Body or "")
-        return false
-    end
-
+    local statusCode = response and tonumber(response.StatusCode or response.Status or response.status_code)
+    local responseBody = response and tostring(response.Body or response.body or "") or ""
+    if statusCode and (statusCode < 200 or statusCode >= 300) then warn("[Webhook] Discord returned HTTP", statusCode, responseBody) return false end
+    if response and response.Success == false then warn("[Webhook] Request API reported failure:", responseBody) return false end
     return true
 end
 
@@ -2938,6 +2960,7 @@ local function HandlePostMatch(skipRejoin)
         end
 
         LastMatchTime = tostring(match.Time)
+        SaveSessionState()
         UpdateSessionGui()
         SendDiscordWebhook(match)
     end
@@ -3340,73 +3363,54 @@ local function DoSetOption(TObj, OptName, OptVal, ReqWave)
 end
 
 local function DoActivateAbility(TObj, AbName, AbData, IsLooping)
-    if type(AbData) == "boolean" then
-        IsLooping = AbData
-        AbData = nil
-    end
-
+    if type(AbData) == "boolean" then IsLooping = AbData AbData = nil end
     AbData = type(AbData) == "table" and AbData or nil
-
-    local positions
-    if AbData and type(AbData.towerPosition) == "table" then
-        positions = AbData.towerPosition
-    end
-
-    local CloneIdx = AbData and AbData.towerToClone
+    local positions = AbData and type(AbData.towerPosition) == "table" and AbData.towerPosition or nil
+    local CloneIdx = AbData and (AbData.towerToClone or AbData.towerTarget)
     local TargetIdx = AbData and AbData.towerTarget
+    local normalizedAbility = tostring(AbName or ""):lower():gsub("[^%w]", "")
+    local isHologram = normalizedAbility:find("hologram", 1, true) ~= nil
 
-    local function attempt()
-        while true do
-            local ok, res = pcall(function()
-                local data
-
-                if AbData then
-                    data = table.clone(AbData)
-
-                    if positions and #positions > 0 then
-                        data.towerPosition = positions[math.random(#positions)]
-                    end
-
-                    if type(CloneIdx) == "number" then
-                        data.towerToClone = TDS.PlacedTowers[CloneIdx]
-                    end
-
-                    if type(TargetIdx) == "number" then
-                        data.towerTarget = TDS.PlacedTowers[TargetIdx]
-                    end
-                end
-
-                return RemoteFunc:InvokeServer(
-                    "Troops",
-                    "Abilities",
-                    "Activate",
-                    {
-                        Troop = TObj,
-                        Name = AbName,
-                        Data = data
-                    }
-                )
-            end)
-
-            if ok and CheckResOk(res) then
-                return true
-            end
-
-            task.wait(0.25)
+    local function resolveTower(value)
+        if type(value) == "number" then return TDS.PlacedTowers[value] end
+        if typeof(value) == "Instance" then return value end
+    end
+    local function resolvePosition(value)
+        if typeof(value) == "Vector3" then return value end
+        if typeof(value) == "CFrame" then return value.Position end
+        if type(value) == "table" then
+            local x,y,z = tonumber(value.X or value.x or value[1]), tonumber(value.Y or value.y or value[2]), tonumber(value.Z or value.z or value[3])
+            if x and y and z then return Vector3.new(x,y,z) end
         end
     end
-
-    if IsLooping then
-        local active = true
-        task.spawn(function()
-            while active do
-                attempt()
-                task.wait(1)
-            end
-        end)
-        return function() active = false end
+    local function buildData()
+        local data = AbData and table.clone(AbData) or {}
+        local chosenPosition
+        if positions and #positions > 0 then chosenPosition = resolvePosition(positions[math.random(#positions)]) else chosenPosition = resolvePosition(data.towerPosition or data.position or data.Position) end
+        local cloneTower, targetTower = resolveTower(CloneIdx), resolveTower(TargetIdx)
+        data.towerToClone = cloneTower or data.towerToClone
+        data.towerTarget = targetTower or data.towerTarget
+        if isHologram then
+            local selected = cloneTower or targetTower
+            if selected then data.Tower=selected data.tower=selected data.Target=selected end
+            if chosenPosition then data.Position=chosenPosition data.position=chosenPosition data.towerPosition=chosenPosition end
+        elseif chosenPosition then data.towerPosition = chosenPosition end
+        return next(data) and data or nil
     end
-
+    local function attempt()
+        for tries=1,20 do
+            local ok,res=pcall(function() return RemoteFunc:InvokeServer("Troops","Abilities","Activate",{Troop=TObj,Name=AbName,Data=buildData()}) end)
+            if ok and (CheckResOk(res) or res == nil) then return true end
+            if tries==1 or tries%5==0 then warn("[Ability]",tostring(AbName),"attempt",tries,"failed:",tostring(res)) end
+            task.wait(0.35)
+        end
+        return false
+    end
+    if IsLooping then
+        local active=true
+        task.spawn(function() while active do attempt() task.wait(1) end end)
+        return function() active=false end
+    end
     return attempt()
 end
 
@@ -4219,57 +4223,26 @@ local function StartClaimRewards()
 end
 
 function StartBackToLobby()
-    if GameState ~= "GAME" then return end
-    if BackToLobbyRunning then return end
+    if GameState ~= "GAME" or BackToLobbyRunning then return end
     BackToLobbyRunning = true
-
     task.spawn(function()
         local stateReplicators = ReplicatedStorage:WaitForChild("StateReplicators", 30)
         local gameStateReplicator = stateReplicators and stateReplicators:WaitForChild("GameStateReplicator", 30)
-
-        if not gameStateReplicator then
-            warn("[PostMatch] GameStateReplicator was not found.")
-            BackToLobbyRunning = false
-            return
-        end
-
+        if not gameStateReplicator then BackToLobbyRunning = false return end
         while Globals.AutoRejoin or Globals.AutoRestart do
-            local isGameOver = gameStateReplicator:GetAttribute("GameOver") == true
-
-            if isGameOver then
-                local health = tonumber(gameStateReplicator:GetAttribute("Health")) or 0
-                local won = health > 0
-
-                if won and Globals.AutoRejoin then
-                    if isfile("ADS_LastStrat.lua") then
-                        pcall(delfile, "ADS_LastStrat.lua")
-                    end
-                    pcall(HandlePostMatch, false)
-                    break
-                elseif not won and Globals.AutoRestart then
-                    -- Collect statistics/webhook first, then queue the same mode again.
-                    pcall(HandlePostMatch, true)
-                    task.wait(1)
-
-                    local ok = pcall(RejoinMatch)
-                    if not ok then
-                        pcall(SmartTeleportToLobby)
-                    end
-                    break
-                elseif Globals.AutoRejoin then
-                    if isfile("ADS_LastStrat.lua") then
-                        pcall(delfile, "ADS_LastStrat.lua")
-                    end
-                    pcall(HandlePostMatch, false)
-                    break
-                end
-            else
+            if gameStateReplicator:GetAttribute("GameOver") == true then
+                local handled, err = pcall(HandlePostMatch, true)
+                if not handled then warn("[PostMatch] HandlePostMatch failed:", err) end
+                task.wait(1)
+                local ok, rejoinErr = pcall(RejoinMatch)
+                if not ok then warn("[PostMatch] Matchmaking failed:", rejoinErr) pcall(SmartTeleportToLobby) end
+                break
+            elseif LastProcessedMatchKey ~= nil then
                 LastProcessedMatchKey = nil
+                SaveSessionState()
             end
-
             task.wait(0.5)
         end
-
         BackToLobbyRunning = false
     end)
 end
