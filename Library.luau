@@ -1,8 +1,15 @@
 local Globals = getgenv()
+local ADS_LIBRARY_VERSION = "CUSTOM_V6_2026_08_02"
 
 if shared.TDSTable then
+    if shared.ADSLibraryVersion ~= ADS_LIBRARY_VERSION then
+        warn("[ADS] An older Library.lua is already loaded in this server. Rejoin Roblox so CUSTOM_V6 can load first. Loaded version:", tostring(shared.ADSLibraryVersion or "original/unknown"))
+    end
     return shared.TDSTable
 end
+
+shared.ADSLibraryVersion = ADS_LIBRARY_VERSION
+print("[ADS] Loaded Library version:", ADS_LIBRARY_VERSION)
 
 local Players = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
@@ -210,18 +217,28 @@ end
 local function PerformHttpRequest(payload)
     local errors = {}
 
+    if #RequestCandidates == 0 then
+        return false, nil, "no request/http_request function exposed by executor"
+    end
+
     for _, candidate in ipairs(RequestCandidates) do
         local ok, response = pcall(candidate.Function, payload)
 
-        if not ok and candidate.Owner then
-            ok, response = pcall(candidate.Function, candidate.Owner, payload)
+        if (not ok or response == nil) and candidate.Owner then
+            local methodOk, methodResponse = pcall(candidate.Function, candidate.Owner, payload)
+            if methodOk and methodResponse ~= nil then
+                ok, response = methodOk, methodResponse
+            elseif not ok then
+                errors[#errors + 1] = candidate.Name .. " direct error: " .. tostring(response)
+                ok, response = methodOk, methodResponse
+            end
         end
 
         if ok and response ~= nil then
             return true, response, candidate.Name
         end
 
-        errors[#errors + 1] = candidate.Name .. ": " .. tostring(response)
+        errors[#errors + 1] = candidate.Name .. (ok and " returned nil" or (" error: " .. tostring(response)))
     end
 
     return false, nil, table.concat(errors, " | ")
@@ -229,6 +246,12 @@ end
 
 if #RequestCandidates == 0 then
     warn("[HTTP] No supported request function was found. Discord webhooks will be unavailable.")
+else
+    local providerNames = {}
+    for _, candidate in ipairs(RequestCandidates) do
+        providerNames[#providerNames + 1] = candidate.Name
+    end
+    print("[HTTP] Available providers:", table.concat(providerNames, ", "))
 end
 
 local BackToLobbyRunning = false
@@ -1325,7 +1348,7 @@ local Automation = Window:Tab({Title = "Automation", Icon = "bot"}) do
             end
             if v and GameState == "GAME" then
                 if #executed_actions > 0 then
-                    local content = "local TDS = shared.TDSTable or loadstring(game:HttpGet(\"https://raw.githubusercontent.com/DuxiiT/auto-strat/refs/heads/main/Library.lua\"))()\n\n"
+                    local content = "local TDS = shared.TDSTable\nif not TDS then\n    repeat task.wait(0.25) TDS = shared.TDSTable until TDS\nend\n\n"
                     content = content .. table.concat(executed_actions, "\n")
                     writefile("ADS_LastStrat.lua", content)
                 end
@@ -1347,7 +1370,7 @@ local Automation = Window:Tab({Title = "Automation", Icon = "bot"}) do
             end
             if v and GameState == "GAME" then
                 if #executed_actions > 0 then
-                    local content = "local TDS = shared.TDSTable or loadstring(game:HttpGet(\"https://raw.githubusercontent.com/DuxiiT/auto-strat/refs/heads/main/Library.lua\"))()\n\n"
+                    local content = "local TDS = shared.TDSTable\nif not TDS then\n    repeat task.wait(0.25) TDS = shared.TDSTable until TDS\nend\n\n"
                     content = content .. table.concat(executed_actions, "\n")
                     writefile("ADS_LastStrat.lua", content)
                 end
@@ -2667,6 +2690,11 @@ local function GetAccountStats()
     }
 end
 
+local ExistingStatsGui = PlayerGui:FindFirstChild("ADS_SessionStats")
+if ExistingStatsGui then
+    ExistingStatsGui:Destroy()
+end
+
 local StatsGui = Instance.new("ScreenGui")
 StatsGui.Name = "ADS_SessionStats"
 StatsGui.ResetOnSpawn = false
@@ -2723,6 +2751,7 @@ local function UpdateSessionGui()
     if not StatsText or not StatsText.Parent then return end
     local account = GetAccountStats()
     StatsText.Text = string.format(
+        '<font color="#166E37">Version: %s</font>\n' ..
         '<font color="#166E37">Runtime: %s</font>\n' ..
         '<font color="#A67C00">Money earned: %s</font>\n' ..
         '<font color="#7D3CCF">Gems earned: %s</font>\n' ..
@@ -2733,6 +2762,7 @@ local function UpdateSessionGui()
         '<font color="#166E37">Session W/L: %s/%s</font>\n' ..
         '<font color="#166E37">Last game: %s</font>\n' ..
         '<font color="#166E37">Game time: %s</font>',
+        ADS_LIBRARY_VERSION,
         FormatDuration(os.time() - SessionStartedAt),
         tostring(SessionEarnedCoins),
         tostring(SessionEarnedGems),
@@ -4116,7 +4146,7 @@ local function strategyRecordingSetup()
                     local actionString = string.format("TDS:%s(%s)", methodName, table.concat(stringifiedArguments, ", "))
                     table.insert(executed_actions, actionString)
                     
-                    local strategyFileContent = "local TDS = shared.TDSTable or loadstring(game:HttpGet(\"https://raw.githubusercontent.com/DuxiiT/auto-strat/refs/heads/main/Library.lua\"))()\n\n"
+                    local strategyFileContent = "local TDS = shared.TDSTable\nif not TDS then\n    repeat task.wait(0.25) TDS = shared.TDSTable until TDS\nend\n\n"
                     strategyFileContent = strategyFileContent .. table.concat(executed_actions, "\n")
                     writefile("ADS_LastStrat.lua", strategyFileContent)
                 end
