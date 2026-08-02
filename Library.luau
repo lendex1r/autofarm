@@ -4941,7 +4941,7 @@ local function StartAutoMilitary()
     end)
 end
 
-local function StartSellFarm()
+function TDS._StartSellFarm()
     if SellFarmsRunning or not Globals.SellFarms then return end
     SellFarmsRunning = true
 
@@ -5015,7 +5015,7 @@ task.spawn(function()
         end
 
         if Globals.SellFarms and not SellFarmsRunning then
-            StartSellFarm()
+            TDS._StartSellFarm()
         end
 
         if Globals.AntiLag and not AntiLagRunning then
