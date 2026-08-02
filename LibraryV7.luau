@@ -1,7 +1,7 @@
 local Globals = getgenv()
-local CUSTOM_LIBRARY_VERSION = "V7_SESSION_WINS_TIMEOUT"
+local CUSTOM_LIBRARY_VERSION = "V7_SESSION_WINS_TIMEOUT_REGFIX"
 print("[ADS] Loaded Library version:", CUSTOM_LIBRARY_VERSION)
-local ADS_LIBRARY_VERSION = "CUSTOM_V7_SESSION_WINS_TIMEOUT_2026_08_02"
+local ADS_LIBRARY_VERSION = "CUSTOM_V7_SESSION_WINS_TIMEOUT_REGFIX_2026_08_02"
 
 if shared.TDSTable then
     if shared.ADSLibraryVersion ~= ADS_LIBRARY_VERSION then
@@ -2546,12 +2546,10 @@ local SessionLosses = 0
 local LastMatchResult = "NO MATCHES YET"
 local LastMatchTime = "--"
 local LastProcessedMatchKey = nil
-local SessionLastSeenAt = os.time()
-local SessionTimeoutSeconds = 30 * 60
 
 local SessionTeleportKey = "ADS_SessionStats_v3"
 
-local function ResetSessionData()
+function TDS._ResetSessionData()
     SessionStartedAt = os.time()
     SessionEarnedCoins = 0
     SessionEarnedGems = 0
@@ -2560,7 +2558,6 @@ local function ResetSessionData()
     LastMatchResult = "NO MATCHES YET"
     LastMatchTime = "--"
     LastProcessedMatchKey = nil
-    SessionLastSeenAt = os.time()
 end
 
 local function ApplySessionData(data)
@@ -2575,8 +2572,8 @@ local function ApplySessionData(data)
         or 0
 
     if savedLastSeen > 0
-        and os.time() - savedLastSeen > SessionTimeoutSeconds then
-        ResetSessionData()
+        and os.time() - savedLastSeen > 1800 then
+        TDS._ResetSessionData()
         return true
     end
 
@@ -2588,7 +2585,6 @@ local function ApplySessionData(data)
     LastMatchResult = tostring(data.LastResult or LastMatchResult)
     LastMatchTime = tostring(data.LastTime or LastMatchTime)
     LastProcessedMatchKey = data.LastMatchKey
-    SessionLastSeenAt = os.time()
     return true
 end
 
@@ -2728,7 +2724,7 @@ local function ReadNumberStat(names)
     return 0
 end
 
-local function ReadWinsFromClientState()
+function TDS._ReadWinsFromClientState()
     local aliases = {
         triumphs = true,
         wins = true,
@@ -2868,7 +2864,7 @@ local function GetAccountStats()
         "Victories"
     })
 
-    local clientWins = ReadWinsFromClientState()
+    local clientWins = TDS._ReadWinsFromClientState()
 
     return {
         Money = ReadNumberStat({"Coins", "Money", "Cash"}),
