@@ -1,7 +1,7 @@
 local Globals = getgenv()
-local CUSTOM_LIBRARY_VERSION = "V7_RETURN_TO_LOBBY"
+local CUSTOM_LIBRARY_VERSION = "V7_SESSION_WINS_TIMEOUT"
 print("[ADS] Loaded Library version:", CUSTOM_LIBRARY_VERSION)
-local ADS_LIBRARY_VERSION = "CUSTOM_V7_RETURN_TO_LOBBY_2026_08_02"
+local ADS_LIBRARY_VERSION = "CUSTOM_V7_SESSION_WINS_TIMEOUT_2026_08_02"
 
 if shared.TDSTable then
     if shared.ADSLibraryVersion ~= ADS_LIBRARY_VERSION then
@@ -2546,11 +2546,40 @@ local SessionLosses = 0
 local LastMatchResult = "NO MATCHES YET"
 local LastMatchTime = "--"
 local LastProcessedMatchKey = nil
+local SessionLastSeenAt = os.time()
+local SessionTimeoutSeconds = 30 * 60
 
-local SessionTeleportKey = "ADS_SessionStats_v2"
+local SessionTeleportKey = "ADS_SessionStats_v3"
+
+local function ResetSessionData()
+    SessionStartedAt = os.time()
+    SessionEarnedCoins = 0
+    SessionEarnedGems = 0
+    SessionWins = 0
+    SessionLosses = 0
+    LastMatchResult = "NO MATCHES YET"
+    LastMatchTime = "--"
+    LastProcessedMatchKey = nil
+    SessionLastSeenAt = os.time()
+end
 
 local function ApplySessionData(data)
-    if type(data) ~= "table" then return false end
+    if type(data) ~= "table" then
+        return false
+    end
+
+    local savedLastSeen =
+        tonumber(data.LastSeenAt)
+        or tonumber(data.SavedAt)
+        or tonumber(data.StartedAt)
+        or 0
+
+    if savedLastSeen > 0
+        and os.time() - savedLastSeen > SessionTimeoutSeconds then
+        ResetSessionData()
+        return true
+    end
+
     SessionStartedAt = tonumber(data.StartedAt) or SessionStartedAt
     SessionEarnedCoins = tonumber(data.EarnedCoins) or 0
     SessionEarnedGems = tonumber(data.EarnedGems) or 0
@@ -2559,6 +2588,7 @@ local function ApplySessionData(data)
     LastMatchResult = tostring(data.LastResult or LastMatchResult)
     LastMatchTime = tostring(data.LastTime or LastMatchTime)
     LastProcessedMatchKey = data.LastMatchKey
+    SessionLastSeenAt = os.time()
     return true
 end
 
@@ -2585,7 +2615,8 @@ local function SaveSessionState()
         Losses = SessionLosses,
         LastResult = LastMatchResult,
         LastTime = LastMatchTime,
-        LastMatchKey = LastProcessedMatchKey
+        LastMatchKey = LastProcessedMatchKey,
+        LastSeenAt = os.time()
     }
 
     pcall(function()
@@ -2697,13 +2728,164 @@ local function ReadNumberStat(names)
     return 0
 end
 
+local function ReadWinsFromClientState()
+    local aliases = {
+        triumphs = true,
+        wins = true,
+        win = true,
+        totalwins = true,
+        totaltriumphs = true,
+        victories = true
+    }
+
+    local function inspectTable(tbl, depth, seen)
+        if type(tbl) ~= "table" or depth > 4 or seen[tbl] then
+            return nil
+        end
+
+        seen[tbl] = true
+
+        for key, value in pairs(tbl) do
+            local normalized =
+                string.lower(tostring(key)):gsub("[^%w]", "")
+
+            if aliases[normalized] then
+                local numberValue = tonumber(value)
+
+                if numberValue then
+                    return numberValue
+                end
+
+                if type(value) == "table" then
+                    numberValue =
+                        tonumber(value.Value)
+                        or tonumber(value.value)
+                        or tonumber(value.Amount)
+                        or tonumber(value.amount)
+
+                    if numberValue then
+                        return numberValue
+                    end
+                end
+            end
+        end
+
+        for _, value in pairs(tbl) do
+            if type(value) == "table" then
+                local result =
+                    inspectTable(value, depth + 1, seen)
+
+                if result then
+                    return result
+                end
+            end
+        end
+
+        return nil
+    end
+
+    -- Player replicator attributes can contain JSON-encoded profile data.
+    local stateReplicators =
+        ReplicatedStorage:FindFirstChild("StateReplicators")
+
+    if stateReplicators then
+        for _, replicator in ipairs(stateReplicators:GetChildren()) do
+            if replicator.Name == "PlayerReplicator"
+                and (
+                    replicator:GetAttribute("UserId") == LocalPlayer.UserId
+                    or replicator:GetAttribute("PlayerId") == LocalPlayer.UserId
+                    or replicator:GetAttribute("Name") == LocalPlayer.Name
+                ) then
+
+                for attributeName, attributeValue
+                    in pairs(replicator:GetAttributes()) do
+
+                    local normalized =
+                        string.lower(attributeName):gsub("[^%w]", "")
+
+                    if aliases[normalized] then
+                        local numberValue = tonumber(attributeValue)
+                        if numberValue then
+                            return numberValue
+                        end
+                    end
+
+                    if type(attributeValue) == "string"
+                        and (
+                            attributeValue:sub(1, 1) == "{"
+                            or attributeValue:sub(1, 1) == "["
+                        ) then
+
+                        local ok, decoded =
+                            pcall(
+                                HttpService.JSONDecode,
+                                HttpService,
+                                attributeValue
+                            )
+
+                        if ok then
+                            local result =
+                                inspectTable(decoded, 0, {})
+
+                            if result then
+                                return result
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Final fallback: inspect loaded client state tables.
+    if type(getgc) == "function" then
+        local ok, objects = pcall(getgc, true)
+
+        if ok and type(objects) == "table" then
+            for _, object in ipairs(objects) do
+                if type(object) == "table" then
+                    local result =
+                        inspectTable(object, 0, {})
+
+                    if result then
+                        return result
+                    end
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
 local function GetAccountStats()
+    local directWins = ReadNumberStat({
+        "Triumphs",
+        "Wins",
+        "Win",
+        "TotalWins",
+        "TotalTriumphs",
+        "Victories"
+    })
+
+    local clientWins = ReadWinsFromClientState()
+
     return {
         Money = ReadNumberStat({"Coins", "Money", "Cash"}),
         Gems = ReadNumberStat({"Gems", "Gem"}),
-        Wins = ReadNumberStat({"Wins", "Win", "Triumphs", "TotalWins", "TotalTriumphs"}),
-        Losses = ReadNumberStat({"Losses", "Loses", "Defeats", "Loss"}),
-        Level = ReadNumberStat({"Level", "CurrentLevel", "PlayerLevel"})
+        Wins = clientWins or directWins or 0,
+        Losses = ReadNumberStat({
+            "Losses",
+            "Loses",
+            "Defeats",
+            "Loss",
+            "TotalLosses"
+        }),
+        Level = ReadNumberStat({
+            "Level",
+            "CurrentLevel",
+            "PlayerLevel"
+        })
     }
 end
 
@@ -4499,6 +4681,62 @@ local function StartClaimRewards()
     AutoClaimRewards = false
 end
 
+function TDS._FindPostMatchState()
+    if type(getgc) ~= "function"
+        or type(debug) ~= "table"
+        or type(debug.getinfo) ~= "function"
+        or type(debug.getupvalues) ~= "function" then
+        return nil
+    end
+
+    for _, fn in ipairs(getgc(true)) do
+        if type(fn) == "function"
+            and (type(islclosure) ~= "function" or islclosure(fn)) then
+
+            local okInfo, info = pcall(debug.getinfo, fn)
+
+            if okInfo
+                and info
+                and info.source == "=ReplicatedStorage.Client.Interfaces.Game.Components.NewRewards"
+                and info.name == "clicked" then
+
+                local okUps, ups = pcall(debug.getupvalues, fn)
+                local state = okUps
+                    and type(ups) == "table"
+                    and ups[1]
+                    or nil
+
+                if type(state) == "table" then
+                    return state
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+function TDS._RunPostMatchAction(actionName)
+    local state = TDS._FindPostMatchState()
+    if type(state) ~= "table" then
+        return false
+    end
+
+    local callback
+
+    if actionName == "PLAY_AGAIN" then
+        callback = state.playAgainClicked
+    elseif actionName == "RESTART" then
+        callback = state.tryAgainClicked
+    end
+
+    if type(callback) ~= "function" then
+        return false
+    end
+
+    return pcall(callback)
+end
+
 function StartBackToLobby()
     if GameState ~= "GAME" or BackToLobbyRunning then
         return
@@ -4524,19 +4762,45 @@ function StartBackToLobby()
 
         while Globals.AutoRejoin or Globals.AutoRestart do
             if gameStateReplicator:GetAttribute("GameOver") == true then
-                -- Process rewards/session statistics, but do not start rematch.
                 pcall(HandlePostMatch, true)
                 pcall(SaveSessionState)
 
-                -- Give the rewards UI a moment to finish updating before teleport.
-                task.wait(2)
+                local health =
+                    tonumber(gameStateReplicator:GetAttribute("Health"))
+                    or 0
 
-                -- After either triumph or defeat, always return to the lobby.
+                local actionName =
+                    health > 0 and "PLAY_AGAIN" or "RESTART"
+
+                local actionSent =
+                    TDS._RunPostMatchAction(actionName)
+
+                if actionSent then
+                    local deadline = os.clock() + 5
+                    local started = false
+
+                    repeat
+                        task.wait(0.2)
+
+                        started =
+                            LocalPlayer:GetAttribute("Loading") == true
+                            or LocalPlayer:GetAttribute("Teleporting") == true
+                            or PlayerGui:FindFirstChild("LoadingScreen") ~= nil
+                            or PlayerGui:FindFirstChild("PlayerCountdown") ~= nil
+                            or gameStateReplicator:GetAttribute("GameOver") == false
+                    until started or os.clock() >= deadline
+
+                    if started then
+                        break
+                    end
+                end
+
+                -- Never remain stuck on the post-match screen.
                 pcall(SmartTeleportToLobby)
                 break
             end
 
-            task.wait(0.5)
+            task.wait(0.25)
         end
 
         BackToLobbyRunning = false
