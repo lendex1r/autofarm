@@ -4499,6 +4499,37 @@ local function StartClaimRewards()
     AutoClaimRewards = false
 end
 
+function TDS._TriggerPlayAgain()
+    if type(getgc) ~= "function" or type(debug) ~= "table" or type(debug.getinfo) ~= "function" or type(debug.getupvalues) ~= "function" then
+        return false, "executor does not support getgc/debug"
+    end
+
+    for _, fn in ipairs(getgc(true)) do
+        if type(fn) == "function" and (type(islclosure) ~= "function" or islclosure(fn)) then
+            local okInfo, info = pcall(debug.getinfo, fn)
+            if okInfo and info
+                and info.source == "=ReplicatedStorage.Client.Interfaces.Game.Components.NewRewards"
+                and info.name == "clicked" then
+
+                local okUps, ups = pcall(debug.getupvalues, fn)
+                local state = okUps and type(ups) == "table" and ups[1] or nil
+                local callback = type(state) == "table" and state.playAgainClicked or nil
+
+                if type(callback) == "function" then
+                    local okCall, err = pcall(callback)
+                    if okCall then
+                        print("[PostMatch] playAgainClicked invoked")
+                        return true
+                    end
+                    return false, err
+                end
+            end
+        end
+    end
+
+    return false, "playAgainClicked callback not found"
+end
+
 function StartBackToLobby()
     if GameState ~= "GAME" or BackToLobbyRunning then return end
     BackToLobbyRunning = true
@@ -4509,10 +4540,34 @@ function StartBackToLobby()
         while Globals.AutoRejoin or Globals.AutoRestart do
             if gameStateReplicator:GetAttribute("GameOver") == true then
                 local handled, err = pcall(HandlePostMatch, true)
-                if not handled then warn("[PostMatch] HandlePostMatch failed:", err) end
-                task.wait(1)
-                local ok, rejoinErr = pcall(RejoinMatch)
-                if not ok then warn("[PostMatch] Matchmaking failed:", rejoinErr) pcall(SmartTeleportToLobby) end
+                if not handled then
+                    warn("[PostMatch] HandlePostMatch failed:", err)
+                end
+
+                -- Since the NewRewards update, Play Again / Restart Match is
+                -- handled by the client-side React callback, not Voting Skip.
+                task.wait(0.75)
+                local playAgainOk, playAgainErr = TDS._TriggerPlayAgain()
+                if not playAgainOk then
+                    warn("[PostMatch] Play Again callback failed:", playAgainErr)
+                end
+
+                -- Give the client time to enter matchmaking or clear GameOver.
+                local restartDeadline = os.clock() + 12
+                repeat
+                    task.wait(0.5)
+                until gameStateReplicator:GetAttribute("GameOver") == false
+                    or os.clock() >= restartDeadline
+
+                -- Fallback for executors/client versions where the callback is unavailable.
+                if gameStateReplicator:GetAttribute("GameOver") == true then
+                    warn("[PostMatch] Client rematch did not start; using matchmaking fallback")
+                    local ok, rejoinErr = pcall(RejoinMatch)
+                    if not ok then
+                        warn("[PostMatch] Matchmaking fallback failed:", rejoinErr)
+                        pcall(SmartTeleportToLobby)
+                    end
+                end
                 break
             elseif LastProcessedMatchKey ~= nil then
                 LastProcessedMatchKey = nil
@@ -4886,7 +4941,7 @@ local function StartAutoMilitary()
     end)
 end
 
-function TDS._StartSellFarm()
+local function StartSellFarm()
     if SellFarmsRunning or not Globals.SellFarms then return end
     SellFarmsRunning = true
 
@@ -4960,7 +5015,7 @@ task.spawn(function()
         end
 
         if Globals.SellFarms and not SellFarmsRunning then
-            TDS._StartSellFarm()
+            StartSellFarm()
         end
 
         if Globals.AntiLag and not AntiLagRunning then
