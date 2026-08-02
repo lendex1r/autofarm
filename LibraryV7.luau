@@ -1,7 +1,7 @@
 local Globals = getgenv()
-local CUSTOM_LIBRARY_VERSION = "V7_RESTART_CONFIRMED"
+local CUSTOM_LIBRARY_VERSION = "V7_RETURN_TO_LOBBY"
 print("[ADS] Loaded Library version:", CUSTOM_LIBRARY_VERSION)
-local ADS_LIBRARY_VERSION = "CUSTOM_V7_RESTART_CONFIRMED_2026_08_02"
+local ADS_LIBRARY_VERSION = "CUSTOM_V7_RETURN_TO_LOBBY_2026_08_02"
 
 if shared.TDSTable then
     if shared.ADSLibraryVersion ~= ADS_LIBRARY_VERSION then
@@ -4499,86 +4499,6 @@ local function StartClaimRewards()
     AutoClaimRewards = false
 end
 
-function TDS._TriggerPlayAgain()
-    if type(getgc) ~= "function"
-        or type(debug) ~= "table"
-        or type(debug.getinfo) ~= "function"
-        or type(debug.getupvalues) ~= "function" then
-        return false, "executor does not support getgc/debug"
-    end
-
-    local foundCallback
-    local foundNetwork
-
-    for _, fn in ipairs(getgc(true)) do
-        if type(fn) == "function"
-            and (type(islclosure) ~= "function" or islclosure(fn)) then
-            local okInfo, info = pcall(debug.getinfo, fn)
-            if okInfo and info
-                and info.source == "=ReplicatedStorage.Client.Interfaces.Game.Views.NewRewards"
-                and info.name == "playAgainClicked" then
-                foundCallback = fn
-                local okUps, ups = pcall(debug.getupvalues, fn)
-                if okUps and type(ups) == "table" then
-                    foundNetwork = ups[4]
-                end
-                break
-            end
-        end
-    end
-
-    if type(foundCallback) ~= "function" then
-        for _, fn in ipairs(getgc(true)) do
-            if type(fn) == "function"
-                and (type(islclosure) ~= "function" or islclosure(fn)) then
-                local okInfo, info = pcall(debug.getinfo, fn)
-                if okInfo and info
-                    and info.source == "=ReplicatedStorage.Client.Interfaces.Game.Components.NewRewards"
-                    and info.name == "clicked" then
-                    local okUps, ups = pcall(debug.getupvalues, fn)
-                    local state = okUps and type(ups) == "table" and ups[1] or nil
-                    if type(state) == "table"
-                        and type(state.playAgainClicked) == "function" then
-                        foundCallback = state.playAgainClicked
-                        local okCallbackUps, callbackUps = pcall(debug.getupvalues, foundCallback)
-                        if okCallbackUps and type(callbackUps) == "table" then
-                            foundNetwork = callbackUps[4]
-                        end
-                        break
-                    end
-                end
-            end
-        end
-    end
-
-    if type(foundNetwork) == "table"
-        and type(foundNetwork.Channel) == "function" then
-        local okDirect, directResult = pcall(function()
-            local channel = foundNetwork.Channel("GameManager")
-            if not channel or type(channel.fireServer) ~= "function" then
-                error("GameManager channel/fireServer not found")
-            end
-            return channel:fireServer("Rematch")
-        end)
-
-        print("[PostMatch] Direct Rematch:", okDirect, tostring(directResult))
-        if okDirect then
-            return true, "direct rematch sent"
-        end
-    end
-
-    if type(foundCallback) == "function" then
-        local okCallback, callbackError = pcall(foundCallback)
-        print("[PostMatch] React callback:", okCallback, tostring(callbackError))
-        if okCallback then
-            return true, "callback invoked"
-        end
-        return false, callbackError
-    end
-
-    return false, "playAgainClicked callback/network not found"
-end
-
 function StartBackToLobby()
     if GameState ~= "GAME" or BackToLobbyRunning then
         return
@@ -4587,69 +4507,33 @@ function StartBackToLobby()
     BackToLobbyRunning = true
 
     task.spawn(function()
-        local stateReplicators = ReplicatedStorage:WaitForChild("StateReplicators", 30)
-        local gameStateReplicator = stateReplicators
-            and stateReplicators:WaitForChild("GameStateReplicator", 30)
+        local stateReplicators =
+            ReplicatedStorage:WaitForChild("StateReplicators", 30)
+
+        local gameStateReplicator =
+            stateReplicators
+            and stateReplicators:WaitForChild(
+                "GameStateReplicator",
+                30
+            )
 
         if not gameStateReplicator then
-            warn("[PostMatch] GameStateReplicator not found")
             BackToLobbyRunning = false
             return
         end
 
         while Globals.AutoRejoin or Globals.AutoRestart do
             if gameStateReplicator:GetAttribute("GameOver") == true then
-                print("[PostMatch] GameOver detected")
-
-                local postOk, postResult = pcall(HandlePostMatch, true)
-                if not postOk then
-                    warn("[PostMatch] HandlePostMatch failed:", postResult)
-                else
-                    print("[PostMatch] Rewards processed")
-                end
-
-                task.wait(1)
-
-                local restartOk, restartResult = TDS._TriggerPlayAgain()
-                print("[PostMatch] Restart request:", restartOk, tostring(restartResult))
-
-                if restartOk then
-                    local deadline = os.clock() + 20
-                    local started = false
-
-                    repeat
-                        task.wait(0.5)
-
-                        local loading = LocalPlayer:GetAttribute("Loading") == true
-                        local teleporting = LocalPlayer:GetAttribute("Teleporting") == true
-                        local lobbyHud = PlayerGui:FindFirstChild("ReactLobbyHud")
-                        local loadingScreen = PlayerGui:FindFirstChild("LoadingScreen")
-                        local countdown = PlayerGui:FindFirstChild("PlayerCountdown")
-
-                        if loading
-                            or teleporting
-                            or loadingScreen
-                            or countdown
-                            or lobbyHud
-                            or gameStateReplicator:GetAttribute("GameOver") == false then
-                            started = true
-                            break
-                        end
-                    until os.clock() >= deadline
-
-                    if started then
-                        print("[PostMatch] Restart confirmed")
-                        break
-                    end
-                end
-
-                warn("[PostMatch] Direct rematch was not confirmed; returning to lobby")
+                -- Process rewards/session statistics, but do not start rematch.
+                pcall(HandlePostMatch, true)
                 pcall(SaveSessionState)
+
+                -- Give the rewards UI a moment to finish updating before teleport.
+                task.wait(2)
+
+                -- After either triumph or defeat, always return to the lobby.
                 pcall(SmartTeleportToLobby)
                 break
-            elseif LastProcessedMatchKey ~= nil then
-                LastProcessedMatchKey = nil
-                SaveSessionState()
             end
 
             task.wait(0.5)
